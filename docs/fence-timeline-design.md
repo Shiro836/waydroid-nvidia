@@ -1,8 +1,10 @@
 # Zero-roundtrip fence export via shared DRM timeline syncobj
 
-Status: implementing (M8.B). Owner: dev loop. Prereqs researched 2026-07-12
-(see STATE.md log: syncobj ioctls are DRM_RENDER_ALLOW, cross-process and
-cross-driver by design; reference designs: linux-drm-syncobj-v1, PipeWire 1.2).
+Status: **working** (M8.B done 2026-07-12: 0.00% janky, flat 5 ms @250 Hz with
+the path engaged). Prereqs researched 2026-07-12 (see STATE.md log: syncobj
+ioctls are DRM_RENDER_ALLOW, cross-process and cross-driver by design;
+reference designs: linux-drm-syncobj-v1, PipeWire 1.2). Kill switch:
+`VTEST_NO_TIMELINE=1` on the server disables the capability param.
 
 ## Problem
 
@@ -35,9 +37,14 @@ Per frame:
 - **Render worker (vkr)**: `vkr_queue_sync_submit` already does
   `QueueSubmit(fence)`; when the submit carries a point, immediately
   `GetFenceFdKHR(SYNC_FD)` (copy transference, legal with a pending signal op)
-  and import: `SYNCOBJ_FD_TO_HANDLE/IMPORT_SYNC_FILE(tmp binary)` +
-  `SYNCOBJ_TRANSFER(tmp → timeline@point)`. In-order per queue, so points
-  materialize in order.
+  and hands `{fd, point}` to a per-context **timeline worker thread** (FIFO,
+  keeps chain seqnos monotonic). The worker imports via the one-ioctl
+  chain-add `SYNCOBJ_FD_TO_HANDLE(IMPORT_SYNC_FILE|TIMELINE, point)`
+  (kernel ≥ 6.16; on EINVAL falls back to scratch-binary
+  IMPORT_SYNC_FILE + TRANSFER) and closes the fd. The worker exists because
+  fence-release/GC work (`drm_syncobj_add_point` ends with a chain GC walk
+  that runs driver release callbacks) and `close()` task_work must not bill
+  to the dispatch thread.
 
 ## Wire/API additions (all gated, fallback = old export path)
 
@@ -64,8 +71,30 @@ Per frame:
 - sync_file export requires a *materialized* point — hence WAIT_AVAILABLE
   before TRANSFER, two-step via tmp binary syncobj (portable to kernels < 6.11).
 
-## Expected effect
+## The drm_file pid-handover trap (root cause of the initial 38 ms regression)
 
-SF: −~0.7 ms/frame critical path; HWUI: −4 socket ops −~0.1 ms; removes
-SYNC_CREATE/UNREF/EXPORT from the per-frame VCMD profile entirely (verify with
-VTEST_STATS after).
+The first implementation passed the guest a `dup()` of the render worker's
+render-node fd. A dup shares the `struct file` → one `drm_file` ioctl'd
+alternately by two processes (host worker imports, guest exports). DRM core's
+`drm_file_update_pid()` (kernel ≥ 6.6, for accurate fdinfo) runs
+`mutex_lock(filelist) + synchronize_rcu()` — ~10 ms under load — on **every
+ioctl whose caller tgid differs from the previous one**; its model is "a
+single handover followed by exclusive repeated use". Result: every host
+import and every guest export ate a synchronize_rcu, 38 ms frames, 94% janky.
+The stall lives in `drm_ioctl()` *before* the syncobj handler, bills to
+whichever process alternates in, and never reproduces single-process — which
+made it look like an NVIDIA driver pathology. (Diagnosed via bpftrace
+off-CPU stacks: `synchronize_rcu ← drm_file_update_pid ← drm_ioctl`.)
+
+Fix: `VCMD_TIMELINE_GET` passes the guest a **freshly opened** node fd
+(`open()` of the same `/dev/dri/renderD*`), so each `drm_file` has exactly
+one user process after a single handover. Rule for any future fd passing:
+never share a long-lived drm_file between processes that both ioctl it.
+
+## Measured effect
+
+App-drawer fling @250 Hz, engaged path (2026-07-12): 644–658 frames/run,
+0.00–0.15% janky, 5 ms at p50/p90/p95/p99 — equal to the best socket-export
+baseline, with SYNC_CREATE/UNREF/EXPORT gone from the per-frame VCMD profile
+and zero slow-import diagnostics over full runs. Remaining gap to the 4 ms
+DoD median is elsewhere (ring notify / hwc), not in fence export.

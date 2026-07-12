@@ -238,7 +238,7 @@ index b718ef2..ebb9e16 100644
  
  static bool
 diff --git a/src/venus/vkr_context.c b/src/venus/vkr_context.c
-index c170bd3..5d5faec 100644
+index c170bd3..b7dbdf1 100644
 --- a/src/venus/vkr_context.c
 +++ b/src/venus/vkr_context.c
 @@ -5,10 +5,15 @@
@@ -273,7 +273,7 @@ index c170bd3..5d5faec 100644
  {
     /* retire fence on cpu timeline directly */
     if (ring_idx == 0) {
-@@ -155,11 +161,232 @@ vkr_context_submit_fence(struct vkr_context *ctx,
+@@ -155,11 +161,274 @@ vkr_context_submit_fence(struct vkr_context *ctx,
     /* always merge fences */
     assert(!(flags & ~VIRGL_RENDERER_FENCE_FLAG_MERGEABLE));
     flags = VIRGL_RENDERER_FENCE_FLAG_MERGEABLE;
@@ -293,45 +293,125 @@ index c170bd3..5d5faec 100644
 +   return vkr_context_submit_fence2(ctx, flags, ring_idx, fence_id, 0);
 +}
 +
++static int64_t
++vkr_timeline_now_ns(void)
++{
++   struct timespec ts;
++   clock_gettime(CLOCK_MONOTONIC, &ts);
++   return (int64_t)ts.tv_sec * 1000000000 + ts.tv_nsec;
++}
++
++/* Perform one sync_file -> timeline-point import.  Runs on the timeline
++ * worker (or inline if the worker failed to start); ctx->timeline handles
++ * are immutable once created, so no lock is needed here.
++ */
++static void
++vkr_context_timeline_import_one(struct vkr_context *ctx,
++                                int sync_file_fd,
++                                uint64_t timeline_point)
++{
++   const int drm_fd = ctx->timeline.drm_fd;
++   bool imported = false;
++
++   const int64_t t0 = vkr_timeline_now_ns();
++   int64_t t_ioctl = t0, t_close = t0;
++
++   if (sync_file_fd >= 0 && ctx->timeline.one_ioctl) {
++      /* one-ioctl chain-add (kernel >= 6.16): no fence replacement happens,
++       * so no prior NVIDIA fence is released synchronously in the ioctl;
++       * waiters wake on the new point before the chain GC walk runs
++       */
++      struct drm_syncobj_handle import = {
++         .handle = ctx->timeline.handle,
++         .flags = DRM_SYNCOBJ_FD_TO_HANDLE_FLAGS_IMPORT_SYNC_FILE |
++                  DRM_SYNCOBJ_FD_TO_HANDLE_FLAGS_TIMELINE,
++         .fd = sync_file_fd,
++         .point = timeline_point,
++      };
++      if (!ioctl(drm_fd, DRM_IOCTL_SYNCOBJ_FD_TO_HANDLE, &import)) {
++         imported = true;
++      } else if (errno == EINVAL) {
++         vkr_log("timeline: no one-ioctl timeline import (pre-6.16 kernel), "
++                 "using scratch-syncobj fallback");
++         ctx->timeline.one_ioctl = false;
++      }
++   }
++
++   if (sync_file_fd >= 0 && !imported && !ctx->timeline.one_ioctl) {
++      /* two-step fallback via the persistent scratch binary syncobj:
++       * IMPORT_SYNC_FILE replaces its fence, then transfer to the point
++       */
++      struct drm_syncobj_handle import = {
++         .handle = ctx->timeline.scratch,
++         .flags = DRM_SYNCOBJ_FD_TO_HANDLE_FLAGS_IMPORT_SYNC_FILE,
++         .fd = sync_file_fd,
++      };
++      struct drm_syncobj_transfer xfer = {
++         .src_handle = ctx->timeline.scratch,
++         .dst_handle = ctx->timeline.handle,
++         .dst_point = timeline_point,
++      };
++      imported = !ioctl(drm_fd, DRM_IOCTL_SYNCOBJ_FD_TO_HANDLE, &import) &&
++                 !ioctl(drm_fd, DRM_IOCTL_SYNCOBJ_TRANSFER, &xfer);
++   }
++
++   if (!imported) {
++      /* fd < 0 = fence already signaled; also the failure fallback so the
++       * client never stalls on WAIT_AVAILABLE
++       */
++      if (sync_file_fd >= 0)
++         vkr_log("timeline: import at point %" PRIu64 " failed, signaling",
++                 timeline_point);
++      const uint64_t point = timeline_point;
++      const uint32_t handle = ctx->timeline.handle;
++      struct drm_syncobj_timeline_array signal = {
++         .handles = (uintptr_t)&handle,
++         .points = (uintptr_t)&point,
++         .count_handles = 1,
++      };
++      ioctl(drm_fd, DRM_IOCTL_SYNCOBJ_TIMELINE_SIGNAL, &signal);
++   }
++
++   t_ioctl = vkr_timeline_now_ns();
++   if (sync_file_fd >= 0)
++      close(sync_file_fd);
++   t_close = vkr_timeline_now_ns();
++
++   if (t_close - t0 > 2000000)
++      vkr_log("NVWD-TL slow import point %" PRIu64 ": ioctls %" PRId64
++              " us close %" PRId64 " us (%s)",
++              timeline_point, (t_ioctl - t0) / 1000, (t_close - t_ioctl) / 1000,
++              ctx->timeline.one_ioctl ? "one-ioctl" : "scratch");
++}
++
 +static int
-+vkr_context_timeline_reaper(void *arg)
++vkr_context_timeline_worker(void *arg)
 +{
 +   struct vkr_context *ctx = arg;
 +
 +   mtx_lock(&ctx->timeline.mutex);
 +   while (true) {
-+      while (!ctx->timeline.reaper.count && !ctx->timeline.reaper.join)
-+         cnd_wait(&ctx->timeline.reaper.cond, &ctx->timeline.mutex);
++      while (!ctx->timeline.worker.count && !ctx->timeline.worker.join)
++         cnd_wait(&ctx->timeline.worker.cond, &ctx->timeline.mutex);
 +
-+      int fds[ARRAY_SIZE(ctx->timeline.reaper.fds)];
-+      const uint32_t count = ctx->timeline.reaper.count;
-+      memcpy(fds, ctx->timeline.reaper.fds, sizeof(fds[0]) * count);
-+      ctx->timeline.reaper.count = 0;
-+      const bool join = ctx->timeline.reaper.join;
++      struct {
++         int fd;
++         uint64_t point;
++      } jobs[ARRAY_SIZE(ctx->timeline.worker.jobs)];
++      const uint32_t count = ctx->timeline.worker.count;
++      memcpy(jobs, ctx->timeline.worker.jobs, sizeof(jobs[0]) * count);
++      ctx->timeline.worker.count = 0;
++      const bool join = ctx->timeline.worker.join;
++      cnd_broadcast(&ctx->timeline.worker.space);
 +      mtx_unlock(&ctx->timeline.mutex);
 +
 +      for (uint32_t i = 0; i < count; i++)
-+         close(fds[i]);
++         vkr_context_timeline_import_one(ctx, jobs[i].fd, jobs[i].point);
 +
 +      if (join)
 +         return 0;
 +      mtx_lock(&ctx->timeline.mutex);
 +   }
-+}
-+
-+/* hand a toxic fd to the reaper; falls back to a direct close if the reaper
-+ * queue is full or the reaper never started
-+ */
-+static void
-+vkr_context_timeline_reap_fd_locked(struct vkr_context *ctx, int fd)
-+{
-+   if (!ctx->timeline.reaper.started ||
-+       ctx->timeline.reaper.count == ARRAY_SIZE(ctx->timeline.reaper.fds)) {
-+      close(fd);
-+      return;
-+   }
-+   ctx->timeline.reaper.fds[ctx->timeline.reaper.count++] = fd;
-+   cnd_signal(&ctx->timeline.reaper.cond);
 +}
 +
 +/* Any render node works: syncobjs are containers for driver-agnostic
@@ -352,6 +432,7 @@ index c170bd3..5d5faec 100644
 +      int fd = open(path, O_RDWR | O_CLOEXEC);
 +      if (fd < 0)
 +         continue;
++      snprintf(ctx->timeline.node_path, sizeof(ctx->timeline.node_path), "%s", path);
 +
 +      struct drm_get_cap cap = { .capability = DRM_CAP_SYNCOBJ_TIMELINE };
 +      struct drm_syncobj_create create = { 0 };
@@ -366,13 +447,20 @@ index c170bd3..5d5faec 100644
 +      ctx->timeline.drm_fd = fd;
 +      ctx->timeline.handle = create.handle;
 +      ctx->timeline.scratch = scratch.handle;
++      ctx->timeline.one_ioctl = true;
 +
-+      if (cnd_init(&ctx->timeline.reaper.cond) == thrd_success) {
-+         if (thrd_create(&ctx->timeline.reaper.thread,
-+                         vkr_context_timeline_reaper, ctx) == thrd_success)
-+            ctx->timeline.reaper.started = true;
-+         else
-+            cnd_destroy(&ctx->timeline.reaper.cond);
++      if (cnd_init(&ctx->timeline.worker.cond) == thrd_success) {
++         if (cnd_init(&ctx->timeline.worker.space) == thrd_success) {
++            if (thrd_create(&ctx->timeline.worker.thread,
++                            vkr_context_timeline_worker, ctx) == thrd_success) {
++               ctx->timeline.worker.started = true;
++            } else {
++               cnd_destroy(&ctx->timeline.worker.space);
++               cnd_destroy(&ctx->timeline.worker.cond);
++            }
++         } else {
++            cnd_destroy(&ctx->timeline.worker.cond);
++         }
 +      }
 +      return true;
 +   }
@@ -393,9 +481,16 @@ index c170bd3..5d5faec 100644
 +      return -ENODEV;
 +   }
 +
-+   /* the client also gets a dup of the render-node fd so it can perform
-+    * syncobj ioctls without needing (or having permissions on) a /dev/dri
-+    * node of its own — fd passing sidesteps path access entirely
++   /* the client also gets a render-node fd so it can perform syncobj ioctls
++    * without needing (or having permissions on) a /dev/dri node of its own —
++    * fd passing sidesteps path access entirely.
++    *
++    * This must be a FRESH open, not a dup of our fd: a dup shares the
++    * struct file (and thus the drm_file), and DRM core's
++    * drm_file_update_pid() runs mutex + synchronize_rcu (~10 ms under load)
++    * on EVERY ioctl whose caller tgid differs from the previous one — two
++    * processes alternating ioctls on one drm_file poisons both.  With a
++    * fresh file the client is its sole user after a single handover.
 +    */
 +   struct drm_syncobj_handle args = { .handle = ctx->timeline.handle };
 +   const int ret = ioctl(ctx->timeline.drm_fd, DRM_IOCTL_SYNCOBJ_HANDLE_TO_FD, &args);
@@ -404,7 +499,7 @@ index c170bd3..5d5faec 100644
 +      return -errno;
 +   }
 +
-+   const int node_fd = fcntl(ctx->timeline.drm_fd, F_DUPFD_CLOEXEC, 0);
++   const int node_fd = open(ctx->timeline.node_path, O_RDWR | O_CLOEXEC);
 +   mtx_unlock(&ctx->timeline.mutex);
 +   if (node_fd < 0) {
 +      close(args.fd);
@@ -421,103 +516,51 @@ index c170bd3..5d5faec 100644
 +                            int sync_file_fd,
 +                            uint64_t timeline_point)
 +{
-+   /* NVWD-TL diagnostics */
-+#define TL_NOW(slot)                                                         \
-+   do {                                                                      \
-+      struct timespec _ts;                                                   \
-+      clock_gettime(CLOCK_MONOTONIC, &_ts);                                  \
-+      t_dbg[slot] = (int64_t)_ts.tv_sec * 1000000000 + _ts.tv_nsec;          \
-+   } while (0)
-+   int64_t t_dbg[6] = { 0 };
-+   struct timespec ts_dbg;
-+   TL_NOW(0);
-+   const int64_t t0_dbg = t_dbg[0];
-+
 +   mtx_lock(&ctx->timeline.mutex);
-+   TL_NOW(1);
++
 +   /* nothing to do until a client has fetched the timeline */
-+   if (!ctx->timeline.handle)
-+      goto out;
-+
-+   const int drm_fd = ctx->timeline.drm_fd;
-+   bool imported = false;
-+
-+   if (sync_file_fd >= 0) {
-+      /* Two-step import (portable to kernels without the one-ioctl timeline
-+       * sync_file import) via the PERSISTENT scratch binary syncobj:
-+       * IMPORT_SYNC_FILE replaces its fence, then transfer to the timeline
-+       * point.  No per-import create/destroy — SYNCOBJ_CREATE stalls 8-13 ms
-+       * inside the render worker (root cause under investigation).
-+       */
-+      struct drm_syncobj_handle import = {
-+         .handle = ctx->timeline.scratch,
-+         .flags = DRM_SYNCOBJ_FD_TO_HANDLE_FLAGS_IMPORT_SYNC_FILE,
-+         .fd = sync_file_fd,
-+      };
-+      struct drm_syncobj_transfer xfer = {
-+         .src_handle = ctx->timeline.scratch,
-+         .dst_handle = ctx->timeline.handle,
-+         .dst_point = timeline_point,
-+      };
-+      const bool i_ok = !ioctl(drm_fd, DRM_IOCTL_SYNCOBJ_FD_TO_HANDLE, &import);
-+      TL_NOW(2);
-+      imported = i_ok && !ioctl(drm_fd, DRM_IOCTL_SYNCOBJ_TRANSFER, &xfer);
-+      TL_NOW(3);
-+   }
-+
-+   if (!imported) {
-+      /* fd < 0 = fence already signaled; also the failure fallback so the
-+       * client never stalls on WAIT_AVAILABLE
-+       */
++   if (!ctx->timeline.handle) {
++      mtx_unlock(&ctx->timeline.mutex);
 +      if (sync_file_fd >= 0)
-+         vkr_log("timeline: import at point %" PRIu64 " failed, signaling",
-+                 timeline_point);
-+      const uint64_t point = timeline_point;
-+      const uint32_t handle = ctx->timeline.handle;
-+      struct drm_syncobj_timeline_array signal = {
-+         .handles = (uintptr_t)&handle,
-+         .points = (uintptr_t)&point,
-+         .count_handles = 1,
-+      };
-+      ioctl(drm_fd, DRM_IOCTL_SYNCOBJ_TIMELINE_SIGNAL, &signal);
++         close(sync_file_fd);
++      return;
 +   }
 +
-+   if (sync_file_fd >= 0) {
-+      vkr_context_timeline_reap_fd_locked(ctx, sync_file_fd);
-+      sync_file_fd = -1;
++   if (ctx->timeline.worker.started) {
++      /* full queue = 64 frames of backlog; block rather than reorder (points
++       * must land monotonically) or import inline (would bill fence releases
++       * to this thread)
++       */
++      while (ctx->timeline.worker.count == ARRAY_SIZE(ctx->timeline.worker.jobs))
++         cnd_wait(&ctx->timeline.worker.space, &ctx->timeline.mutex);
++
++      ctx->timeline.worker.jobs[ctx->timeline.worker.count].fd = sync_file_fd;
++      ctx->timeline.worker.jobs[ctx->timeline.worker.count].point = timeline_point;
++      ctx->timeline.worker.count++;
++      cnd_signal(&ctx->timeline.worker.cond);
++      mtx_unlock(&ctx->timeline.mutex);
++      return;
 +   }
 +
-+out:
 +   mtx_unlock(&ctx->timeline.mutex);
-+   if (sync_file_fd >= 0)
-+      close(sync_file_fd);
-+
-+   TL_NOW(4);
-+   (void)ts_dbg;
-+   if (t_dbg[4] - t0_dbg > 2000000)
-+      vkr_log("NVWD-TL slow import point %" PRIu64 ": lock %" PRId64
-+              " fd2h %" PRId64 " xfer %" PRId64 " tail %" PRId64 " us",
-+              timeline_point, (t_dbg[1] - t_dbg[0]) / 1000,
-+              t_dbg[2] ? (t_dbg[2] - t_dbg[1]) / 1000 : -1,
-+              t_dbg[3] ? (t_dbg[3] - t_dbg[2]) / 1000 : -1,
-+              (t_dbg[4] - (t_dbg[3] ? t_dbg[3] : t_dbg[1])) / 1000);
-+#undef TL_NOW
++   vkr_context_timeline_import_one(ctx, sync_file_fd, timeline_point);
 +}
 +
  int
  vkr_context_export_fence(struct vkr_context *ctx,
                           uint32_t ring_idx,
-@@ -644,6 +871,24 @@ vkr_context_destroy(struct vkr_context *ctx)
+@@ -644,6 +913,25 @@ vkr_context_destroy(struct vkr_context *ctx)
  
     vkr_context_wait_ring_fini(ctx);
  
-+   if (ctx->timeline.reaper.started) {
++   if (ctx->timeline.worker.started) {
 +      mtx_lock(&ctx->timeline.mutex);
-+      ctx->timeline.reaper.join = true;
-+      cnd_signal(&ctx->timeline.reaper.cond);
++      ctx->timeline.worker.join = true;
++      cnd_signal(&ctx->timeline.worker.cond);
 +      mtx_unlock(&ctx->timeline.mutex);
-+      thrd_join(ctx->timeline.reaper.thread, NULL);
-+      cnd_destroy(&ctx->timeline.reaper.cond);
++      thrd_join(ctx->timeline.worker.thread, NULL);
++      cnd_destroy(&ctx->timeline.worker.space);
++      cnd_destroy(&ctx->timeline.worker.cond);
 +   }
 +   if (ctx->timeline.handle) {
 +      struct drm_syncobj_destroy destroy = { .handle = ctx->timeline.handle };
@@ -532,7 +575,7 @@ index c170bd3..5d5faec 100644
     if (ctx->ring_monitor.started)
        vkr_context_ring_monitor_fini(ctx);
  
-@@ -727,6 +972,11 @@ vkr_context_create(uint32_t ctx_id,
+@@ -727,6 +1015,11 @@ vkr_context_create(uint32_t ctx_id,
     if (!vkr_context_wait_ring_init(ctx))
        goto err_ctx_wait_ring_init;
  
@@ -545,10 +588,10 @@ index c170bd3..5d5faec 100644
        goto err_ctx_object_mutex;
  
 diff --git a/src/venus/vkr_context.h b/src/venus/vkr_context.h
-index 7ba72eb..bb21363 100644
+index 7ba72eb..f560b32 100644
 --- a/src/venus/vkr_context.h
 +++ b/src/venus/vkr_context.h
-@@ -98,6 +98,37 @@ struct vkr_context {
+@@ -98,6 +98,50 @@ struct vkr_context {
  
     struct vkr_queue *sync_queues[64];
  
@@ -560,33 +603,46 @@ index 7ba72eb..bb21363 100644
 +   struct {
 +      mtx_t mutex;
 +      int drm_fd;      /* render node used for syncobj ioctls, -1 = none */
++      char node_path[64]; /* path of drm_fd, for fresh per-client opens */
 +      uint32_t handle; /* timeline syncobj handle, 0 = not created */
-+      /* persistent scratch binary syncobj for sync_file -> timeline-point
-+       * imports: IMPORT_SYNC_FILE replaces its fence each time, so no
-+       * per-import create/destroy (SYNCOBJ_CREATE is unexplainably slow -
-+       * 8-13 ms - inside the render worker; see STATE.md 2026-07-12)
++      /* scratch binary syncobj for the two-step import fallback
++       * (IMPORT_SYNC_FILE + TRANSFER) on kernels without the one-ioctl
++       * timeline import
 +       */
 +      uint32_t scratch;
++      /* one-ioctl sync_file -> timeline-point import,
++       * DRM_SYNCOBJ_FD_TO_HANDLE_FLAGS_IMPORT_SYNC_FILE | _TIMELINE
++       * (kernel >= 6.16); cleared on EINVAL and the scratch fallback takes
++       * over.  Only the import path (single thread) mutates this.
++       */
++      bool one_ioctl;
 +
-+      /* Closing an NVIDIA sync_file defers its fence teardown (which sleeps
-+       * in synchronize_rcu, ~10 ms) into task_work that runs on the closing
-+       * thread's next syscall return — poisoning the dispatch thread's
-+       * latency.  A reaper thread absorbs the closes instead.
++      /* All dma_fence-release-bearing work runs on this worker, off the
++       * dispatch thread: the chain-add import garbage-collects prior chain
++       * nodes (running the driver's fence release callbacks, milliseconds
++       * on NVIDIA under concurrent submits), and closing a sync_file defers
++       * its teardown via task_work to the closing thread's next syscall
++       * exit.  Jobs are FIFO on a single thread so timeline points land in
++       * submit order, keeping dma_fence_chain seqnos monotonic.
 +       */
 +      struct {
 +         thrd_t thread;
-+         cnd_t cond;
++         cnd_t cond;  /* worker wake: jobs pending or join */
++         cnd_t space; /* producer wake: queue no longer full */
 +         bool started;
 +         bool join;
-+         int fds[64];
++         struct {
++            int fd; /* sync_file, or -1 to signal the point directly */
++            uint64_t point;
++         } jobs[64];
 +         uint32_t count;
-+      } reaper;
++      } worker;
 +   } timeline;
 +
     struct vkr_instance *instance;
     char *instance_name;
  
-@@ -130,6 +161,30 @@ vkr_context_submit_fence(struct vkr_context *ctx,
+@@ -130,6 +174,30 @@ vkr_context_submit_fence(struct vkr_context *ctx,
                           uint32_t ring_idx,
                           uint64_t fence_id);
  

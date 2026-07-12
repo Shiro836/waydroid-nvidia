@@ -460,10 +460,10 @@ index fc5ff2c..1d8f456 100644
  
  struct vn_renderer_wait {
 diff --git a/src/virtio/vulkan/vn_renderer_vtest.c b/src/virtio/vulkan/vn_renderer_vtest.c
-index 7aaebd2..30829c2 100644
+index 7aaebd2..6212e83 100644
 --- a/src/virtio/vulkan/vn_renderer_vtest.c
 +++ b/src/virtio/vulkan/vn_renderer_vtest.c
-@@ -10,13 +10,17 @@
+@@ -10,12 +10,15 @@
  #include <errno.h>
  #include <netinet/in.h>
  #include <poll.h>
@@ -477,11 +477,9 @@ index 7aaebd2..30829c2 100644
  
 +#include "drm-uapi/drm.h"
  #include "drm-uapi/virtgpu_drm.h"
-+#include "util/log.h"
  #include "util/os_file.h"
  #include "util/os_misc.h"
- #include "util/sparse_array.h"
-@@ -44,6 +48,11 @@ struct vtest_bo {
+@@ -44,6 +47,11 @@ struct vtest_bo {
  
  struct vtest_sync {
     struct vn_renderer_sync base;
@@ -493,7 +491,7 @@ index 7aaebd2..30829c2 100644
  };
  
  struct vtest {
-@@ -58,6 +67,18 @@ struct vtest {
+@@ -58,6 +66,18 @@ struct vtest {
     uint32_t max_timeline_count;
     bool has_venus_sync_fd;
  
@@ -512,7 +510,7 @@ index 7aaebd2..30829c2 100644
     struct {
        uint32_t id;
        uint32_t version;
-@@ -532,6 +553,39 @@ vtest_vcmd_resource_import_blob(struct vtest *vtest, uint64_t size, int fd)
+@@ -532,6 +552,39 @@ vtest_vcmd_resource_import_blob(struct vtest *vtest, uint64_t size, int fd)
     return res_id;
  }
  
@@ -552,7 +550,7 @@ index 7aaebd2..30829c2 100644
  static int
  vtest_vcmd_sync_export_sync_file(struct vtest *vtest,
                                   uint32_t sync_id,
-@@ -581,11 +635,31 @@ vtest_vcmd_submit_cmd2(struct vtest *vtest,
+@@ -581,11 +634,31 @@ vtest_vcmd_submit_cmd2(struct vtest *vtest,
     if (!total_size)
        return;
  
@@ -586,7 +584,7 @@ index 7aaebd2..30829c2 100644
     /* write batch count and batch headers */
     const uint32_t batch_count = 1;
     size_t sync_offset = header_size + batch->cs_size;
-@@ -658,6 +732,74 @@ vtest_sync_reset(struct vn_renderer *renderer,
+@@ -658,6 +731,59 @@ vtest_sync_reset(struct vn_renderer *renderer,
     return vtest_sync_write(renderer, sync, initial_val);
  }
  
@@ -640,34 +638,17 @@ index 7aaebd2..30829c2 100644
 +   struct drm_syncobj_destroy destroy = { .handle = create.handle };
 +   ioctl(node_fd, DRM_IOCTL_SYNCOBJ_DESTROY, &destroy);
 +
-+   /* NVWD-TL diagnostics: materialize-wait duration + signaled-at-export */
-+   struct timespec ts2;
-+   clock_gettime(CLOCK_MONOTONIC, &ts2);
-+   const int64_t wait_us =
-+      ((int64_t)ts2.tv_sec * 1000000000 + ts2.tv_nsec -
-+       ((int64_t)ts.tv_sec * 1000000000 + ts.tv_nsec)) / 1000;
-+   int signaled = -1;
-+   if (ok) {
-+      struct pollfd pfd = { .fd = export.fd, .events = POLLIN };
-+      signaled = poll(&pfd, 1, 0) > 0;
-+   }
-+   mesa_loge("NVWD-TL export point %" PRIu64 ": wait %" PRId64
-+             " us, ok %d, signaled-at-export %d",
-+             point, wait_us, ok, signaled);
-+
 +   return ok ? export.fd : -ENOTSUP;
 +}
 +
  static int
  vtest_sync_export_syncobj(struct vn_renderer *renderer,
                            struct vn_renderer_sync *_sync,
-@@ -670,6 +812,16 @@ vtest_sync_export_syncobj(struct vn_renderer *renderer,
+@@ -670,6 +796,14 @@ vtest_sync_export_syncobj(struct vn_renderer *renderer,
     if (!sync_file || !vtest->has_venus_sync_fd)
        return -ENOTSUP;
  
-+   /* bisect: set to false to use timeline submits but socket exports */
-+   static const bool use_local_export = true;
-+   if (use_local_export && vtest->timeline.handle && sync->timeline_point) {
++   if (vtest->timeline.handle && sync->timeline_point) {
 +      const int fd =
 +         vtest_timeline_export_sync_file(vtest, sync->timeline_point);
 +      if (fd >= 0)
@@ -678,7 +659,7 @@ index 7aaebd2..30829c2 100644
     /* Resolve the (binary) sync's signal point to the pending submit's
      * VkFence on the server and export a sync_file from it.  -1 means the
      * point already retired (already-signaled sync_file convention).
-@@ -1078,6 +1230,12 @@ vtest_destroy(struct vn_renderer *renderer,
+@@ -1078,6 +1212,12 @@ vtest_destroy(struct vn_renderer *renderer,
        close(vtest->sock_fd);
     }
  
@@ -691,7 +672,7 @@ index 7aaebd2..30829c2 100644
     mtx_destroy(&vtest->sock_mutex);
     util_sparse_array_finish(&vtest->shmem_array);
     util_sparse_array_finish(&vtest->bo_array);
-@@ -1172,6 +1330,28 @@ vtest_init(struct vtest *vtest)
+@@ -1172,6 +1312,28 @@ vtest_init(struct vtest *vtest)
  
     vtest_vcmd_context_init(vtest, vtest->capset.id);
  
