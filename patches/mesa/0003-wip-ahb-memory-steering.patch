@@ -1,3 +1,32 @@
+diff --git a/src/virtio/vtest/vtest_protocol.h b/src/virtio/vtest/vtest_protocol.h
+index c8a1bbf..c7c1dba 100644
+--- a/src/virtio/vtest/vtest_protocol.h
++++ b/src/virtio/vtest/vtest_protocol.h
+@@ -98,6 +98,15 @@
+ #define VCMD_SYNC_EXPORT_SYNC_FILE 39
+ /* import a dmabuf fd as a blob resource attached to the context */
+ #define VCMD_RESOURCE_IMPORT_BLOB 40
++/* 41 = VCMD_RESOURCE_ALLOC_GPU (gralloc wrapper only, unused here) */
++/* get the context's shared DRM timeline syncobj
++ * (reply: status + 2 fds: syncobj, render node)
++ */
++#define VCMD_TIMELINE_GET 42
++/* submit_cmd2 whose fence also materializes a timeline point:
++ * payload = {point_lo, point_hi} followed by a regular submit_cmd2 payload
++ */
++#define VCMD_SUBMIT_CMD2_TIMELINE 43
+ 
+ #define VCMD_RES_CREATE_SIZE 10
+ #define VCMD_RES_CREATE_RES_HANDLE 0 /* must be 0 since protocol version 3 */
+@@ -170,6 +179,8 @@ enum vcmd_param  {
+    VCMD_PARAM_HAS_TIMELINE_SYNCOBJ = 2,
+    /* server supports VCMD_SYNC_EXPORT_SYNC_FILE for venus sync points */
+    VCMD_PARAM_HAS_VENUS_SYNC_FD = 3,
++   /* server supports VCMD_TIMELINE_GET + VCMD_SUBMIT_CMD2_TIMELINE */
++   VCMD_PARAM_HAS_TIMELINE_FENCE = 4,
+ };
+ #define VCMD_GET_PARAM_SIZE 1
+ #define VCMD_GET_PARAM_PARAM 0
 diff --git a/src/virtio/vulkan/vn_android.c b/src/virtio/vulkan/vn_android.c
 index eaa82bc..9c2390e 100644
 --- a/src/virtio/vulkan/vn_android.c
@@ -398,6 +427,299 @@ index 7ee58ac..36795f9 100644
     return vn_result(physical_dev->instance, result);
  }
  
+diff --git a/src/virtio/vulkan/vn_queue.c b/src/virtio/vulkan/vn_queue.c
+index 4c337a3..9083326 100644
+--- a/src/virtio/vulkan/vn_queue.c
++++ b/src/virtio/vulkan/vn_queue.c
+@@ -1853,6 +1853,7 @@ vn_create_sync_file(struct vn_device *dev,
+       .sync_values = &(const uint64_t){ 1 },
+       .sync_count = 1,
+       .ring_idx = external_payload->ring_idx,
++      .external_fence = true,
+    };
+ 
+    uint32_t local_data[8];
+diff --git a/src/virtio/vulkan/vn_renderer.h b/src/virtio/vulkan/vn_renderer.h
+index fc5ff2c..1d8f456 100644
+--- a/src/virtio/vulkan/vn_renderer.h
++++ b/src/virtio/vulkan/vn_renderer.h
+@@ -103,6 +103,15 @@ struct vn_renderer_submit_batch {
+    /* TODO allow NULL when syncs are all binary? */
+    const uint64_t *sync_values;
+    uint32_t sync_count;
++
++   /* This batch exists to materialize an exportable fence (see
++    * vn_create_sync_file); transports may give its fence a shared-timeline
++    * point for local sync_file export.  Only such fences may be pointed:
++    * DRM timeline points are cumulative (point N waits all points <= N), so
++    * pointing regular submits would chain exported fences to unrelated
++    * work (e.g. buffer-release semaphore waits) and serialize the pipeline.
++    */
++   bool external_fence;
+ };
+ 
+ struct vn_renderer_wait {
+diff --git a/src/virtio/vulkan/vn_renderer_vtest.c b/src/virtio/vulkan/vn_renderer_vtest.c
+index 7aaebd2..30829c2 100644
+--- a/src/virtio/vulkan/vn_renderer_vtest.c
++++ b/src/virtio/vulkan/vn_renderer_vtest.c
+@@ -10,13 +10,17 @@
+ #include <errno.h>
+ #include <netinet/in.h>
+ #include <poll.h>
++#include <sys/ioctl.h>
+ #include <sys/mman.h>
+ #include <sys/socket.h>
+ #include <sys/types.h>
+ #include <sys/un.h>
++#include <time.h>
+ #include <unistd.h>
+ 
++#include "drm-uapi/drm.h"
+ #include "drm-uapi/virtgpu_drm.h"
++#include "util/log.h"
+ #include "util/os_file.h"
+ #include "util/os_misc.h"
+ #include "util/sparse_array.h"
+@@ -44,6 +48,11 @@ struct vtest_bo {
+ 
+ struct vtest_sync {
+    struct vn_renderer_sync base;
++
++   /* timeline point assigned by the last submit that signals this sync;
++    * 0 = none (fall back to VCMD_SYNC_EXPORT_SYNC_FILE)
++    */
++   uint64_t timeline_point;
+ };
+ 
+ struct vtest {
+@@ -58,6 +67,18 @@ struct vtest {
+    uint32_t max_timeline_count;
+    bool has_venus_sync_fd;
+ 
++   /* Shared DRM timeline syncobj (see docs/fence-timeline-design.md in the
++    * waydroid-nvidia repo): the server materializes each pointed submit's
++    * fence at its timeline point; sync_file export becomes local syncobj
++    * ioctls instead of socket roundtrips.  node_fd is an open render-node fd
++    * received from the server (no /dev/dri access needed in the guest).
++    */
++   struct {
++      int node_fd;         /* -1 = unsupported/disabled */
++      uint32_t handle;     /* timeline syncobj handle on node_fd */
++      uint64_t next_point; /* guarded by sock_mutex */
++   } timeline;
++
+    struct {
+       uint32_t id;
+       uint32_t version;
+@@ -532,6 +553,39 @@ vtest_vcmd_resource_import_blob(struct vtest *vtest, uint64_t size, int fd)
+    return res_id;
+ }
+ 
++/* on success returns 0 and sets *out_syncobj_fd/*out_node_fd (caller owns) */
++static int
++vtest_vcmd_timeline_get(struct vtest *vtest, int *out_syncobj_fd, int *out_node_fd)
++{
++   uint32_t vtest_hdr[VTEST_HDR_SIZE];
++
++   vtest_hdr[VTEST_CMD_LEN] = 0;
++   vtest_hdr[VTEST_CMD_ID] = VCMD_TIMELINE_GET;
++   vtest_write(vtest, vtest_hdr, sizeof(vtest_hdr));
++
++   vtest_read(vtest, vtest_hdr, sizeof(vtest_hdr));
++   assert(vtest_hdr[VTEST_CMD_ID] == VCMD_TIMELINE_GET);
++
++   uint32_t status;
++   vtest_read(vtest, &status, sizeof(status));
++   if (status)
++      return -ENODEV;
++
++   const int syncobj_fd = vtest_receive_fd(vtest);
++   const int node_fd = vtest_receive_fd(vtest);
++   if (syncobj_fd < 0 || node_fd < 0) {
++      if (syncobj_fd >= 0)
++         close(syncobj_fd);
++      if (node_fd >= 0)
++         close(node_fd);
++      return -ENODEV;
++   }
++
++   *out_syncobj_fd = syncobj_fd;
++   *out_node_fd = node_fd;
++   return 0;
++}
++
+ static int
+ vtest_vcmd_sync_export_sync_file(struct vtest *vtest,
+                                  uint32_t sync_id,
+@@ -581,11 +635,31 @@ vtest_vcmd_submit_cmd2(struct vtest *vtest,
+    if (!total_size)
+       return;
+ 
++   /* Assign a timeline point so the host materializes this submit's fence
++    * into the shared timeline; recorded on the last sync for local export.
++    * Only external-fence batches may be pointed — timeline points are
++    * cumulative, so pointing regular submits would chain exported fences to
++    * unrelated work (see vn_renderer_submit_batch::external_fence).
++    */
++   uint64_t point = 0;
++   if (vtest->timeline.handle && batch->external_fence && batch->sync_count) {
++      point = ++vtest->timeline.next_point;
++      struct vtest_sync *last =
++         (struct vtest_sync *)batch->syncs[batch->sync_count - 1];
++      last->timeline_point = point;
++   }
++
+    uint32_t vtest_hdr[VTEST_HDR_SIZE];
+-   vtest_hdr[VTEST_CMD_LEN] = total_size / sizeof(uint32_t);
+-   vtest_hdr[VTEST_CMD_ID] = VCMD_SUBMIT_CMD2;
++   vtest_hdr[VTEST_CMD_LEN] =
++      total_size / sizeof(uint32_t) + (point ? 2 : 0);
++   vtest_hdr[VTEST_CMD_ID] = point ? VCMD_SUBMIT_CMD2_TIMELINE : VCMD_SUBMIT_CMD2;
+    vtest_write(vtest, vtest_hdr, sizeof(vtest_hdr));
+ 
++   if (point) {
++      const uint32_t point_buf[2] = { (uint32_t)point, (uint32_t)(point >> 32) };
++      vtest_write(vtest, point_buf, sizeof(point_buf));
++   }
++
+    /* write batch count and batch headers */
+    const uint32_t batch_count = 1;
+    size_t sync_offset = header_size + batch->cs_size;
+@@ -658,6 +732,74 @@ vtest_sync_reset(struct vn_renderer *renderer,
+    return vtest_sync_write(renderer, sync, initial_val);
+ }
+ 
++/* Export a sync_file of a materialized timeline point with local syncobj
++ * ioctls only — zero socket traffic.  Returns the fd, or < -1 to make the
++ * caller fall back to the socket export.
++ */
++static int
++vtest_timeline_export_sync_file(struct vtest *vtest, uint64_t point)
++{
++   const int node_fd = vtest->timeline.node_fd;
++
++   /* wait for the host to materialize the point (QueueSubmit + import);
++    * the real GPU wait stays with the consumer of the sync_file
++    */
++   struct timespec ts;
++   clock_gettime(CLOCK_MONOTONIC, &ts);
++   struct drm_syncobj_timeline_wait wait = {
++      .handles = (uintptr_t)&vtest->timeline.handle,
++      .points = (uintptr_t)&point,
++      .timeout_nsec = (int64_t)ts.tv_sec * 1000000000 + ts.tv_nsec +
++                      1000ll * 1000 * 1000,
++      .count_handles = 1,
++      /* WAIT_FOR_SUBMIT is required to block on a not-yet-materialized
++       * point (without it the kernel returns -EINVAL immediately);
++       * WAIT_AVAILABLE makes the wait end at materialization instead of
++       * signal
++       */
++      .flags = DRM_SYNCOBJ_WAIT_FLAGS_WAIT_FOR_SUBMIT |
++               DRM_SYNCOBJ_WAIT_FLAGS_WAIT_AVAILABLE,
++   };
++   if (ioctl(node_fd, DRM_IOCTL_SYNCOBJ_TIMELINE_WAIT, &wait))
++      return -ENOTSUP;
++
++   struct drm_syncobj_create create = { 0 };
++   if (ioctl(node_fd, DRM_IOCTL_SYNCOBJ_CREATE, &create))
++      return -ENOTSUP;
++
++   struct drm_syncobj_transfer xfer = {
++      .src_handle = vtest->timeline.handle,
++      .dst_handle = create.handle,
++      .src_point = point,
++   };
++   struct drm_syncobj_handle export = {
++      .handle = create.handle,
++      .flags = DRM_SYNCOBJ_HANDLE_TO_FD_FLAGS_EXPORT_SYNC_FILE,
++   };
++   const bool ok = !ioctl(node_fd, DRM_IOCTL_SYNCOBJ_TRANSFER, &xfer) &&
++                   !ioctl(node_fd, DRM_IOCTL_SYNCOBJ_HANDLE_TO_FD, &export);
++
++   struct drm_syncobj_destroy destroy = { .handle = create.handle };
++   ioctl(node_fd, DRM_IOCTL_SYNCOBJ_DESTROY, &destroy);
++
++   /* NVWD-TL diagnostics: materialize-wait duration + signaled-at-export */
++   struct timespec ts2;
++   clock_gettime(CLOCK_MONOTONIC, &ts2);
++   const int64_t wait_us =
++      ((int64_t)ts2.tv_sec * 1000000000 + ts2.tv_nsec -
++       ((int64_t)ts.tv_sec * 1000000000 + ts.tv_nsec)) / 1000;
++   int signaled = -1;
++   if (ok) {
++      struct pollfd pfd = { .fd = export.fd, .events = POLLIN };
++      signaled = poll(&pfd, 1, 0) > 0;
++   }
++   mesa_loge("NVWD-TL export point %" PRIu64 ": wait %" PRId64
++             " us, ok %d, signaled-at-export %d",
++             point, wait_us, ok, signaled);
++
++   return ok ? export.fd : -ENOTSUP;
++}
++
+ static int
+ vtest_sync_export_syncobj(struct vn_renderer *renderer,
+                           struct vn_renderer_sync *_sync,
+@@ -670,6 +812,16 @@ vtest_sync_export_syncobj(struct vn_renderer *renderer,
+    if (!sync_file || !vtest->has_venus_sync_fd)
+       return -ENOTSUP;
+ 
++   /* bisect: set to false to use timeline submits but socket exports */
++   static const bool use_local_export = true;
++   if (use_local_export && vtest->timeline.handle && sync->timeline_point) {
++      const int fd =
++         vtest_timeline_export_sync_file(vtest, sync->timeline_point);
++      if (fd >= 0)
++         return fd;
++      vn_log(vtest->instance, "timeline export failed, socket fallback");
++   }
++
+    /* Resolve the (binary) sync's signal point to the pending submit's
+     * VkFence on the server and export a sync_file from it.  -1 means the
+     * point already retired (already-signaled sync_file convention).
+@@ -1078,6 +1230,12 @@ vtest_destroy(struct vn_renderer *renderer,
+       close(vtest->sock_fd);
+    }
+ 
++   if (vtest->timeline.node_fd >= 0) {
++      struct drm_syncobj_destroy destroy = { .handle = vtest->timeline.handle };
++      ioctl(vtest->timeline.node_fd, DRM_IOCTL_SYNCOBJ_DESTROY, &destroy);
++      close(vtest->timeline.node_fd);
++   }
++
+    mtx_destroy(&vtest->sock_mutex);
+    util_sparse_array_finish(&vtest->shmem_array);
+    util_sparse_array_finish(&vtest->bo_array);
+@@ -1172,6 +1330,28 @@ vtest_init(struct vtest *vtest)
+ 
+    vtest_vcmd_context_init(vtest, vtest->capset.id);
+ 
++   /* fetch the shared fence timeline (syncobj fd + render-node fd); on any
++    * failure stay on the socket sync_file export path
++    */
++   vtest->timeline.node_fd = -1;
++   if (vtest->has_venus_sync_fd &&
++       vtest_vcmd_get_param(vtest, VCMD_PARAM_HAS_TIMELINE_FENCE) &&
++       !os_get_option("VTEST_NO_TIMELINE_FENCE")) {
++      int syncobj_fd, node_fd;
++      if (!vtest_vcmd_timeline_get(vtest, &syncobj_fd, &node_fd)) {
++         struct drm_syncobj_handle import = { .fd = syncobj_fd };
++         if (!ioctl(node_fd, DRM_IOCTL_SYNCOBJ_FD_TO_HANDLE, &import)) {
++            vtest->timeline.node_fd = node_fd;
++            vtest->timeline.handle = import.handle;
++         } else {
++            close(node_fd);
++         }
++         close(syncobj_fd);
++      }
++      if (vtest->timeline.node_fd < 0)
++         vn_log(vtest->instance, "fence timeline unavailable, using socket export");
++   }
++
+    vtest_init_renderer_info(vtest);
+ 
+    vtest->base.ops.destroy = vtest_destroy;
 diff --git a/src/vulkan/runtime/vk_android.c b/src/vulkan/runtime/vk_android.c
 index fd9ee5d..f773a51 100644
 --- a/src/vulkan/runtime/vk_android.c

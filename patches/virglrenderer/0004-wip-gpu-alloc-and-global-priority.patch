@@ -1,3 +1,622 @@
+diff --git a/server/render_context.c b/server/render_context.c
+index 718b1b5..fd56a6b 100644
+--- a/server/render_context.c
++++ b/server/render_context.c
+@@ -62,8 +62,32 @@ render_context_dispatch_submit_fence(struct render_context *ctx,
+    /* always merge fences */
+    assert(!(req->flags & ~VIRGL_RENDERER_FENCE_FLAG_MERGEABLE));
+    assert(req->ring_index < (uint32_t)ctx->timeline_count);
+-   return render_state_submit_fence(ctx->ctx_id, VIRGL_RENDERER_FENCE_FLAG_MERGEABLE,
+-                                    req->ring_index, req->seqno);
++   return render_state_submit_fence2(ctx->ctx_id, VIRGL_RENDERER_FENCE_FLAG_MERGEABLE,
++                                     req->ring_index, req->seqno,
++                                     req->timeline_point);
++}
++
++static bool
++render_context_dispatch_get_timeline(struct render_context *ctx,
++                                     UNUSED const union render_context_op_request *request,
++                                     UNUSED const int *fds,
++                                     UNUSED int fd_count)
++{
++   struct render_context_op_get_timeline_reply reply = {
++      .status = 1,
++   };
++
++   int out_fds[2] = { -1, -1 };
++   if (!render_state_get_timeline_fd(ctx->ctx_id, &out_fds[0], &out_fds[1])) {
++      reply.status = 0;
++      const bool ok = render_socket_send_reply_with_fds(&ctx->socket, &reply,
++                                                        sizeof(reply), out_fds, 2);
++      close(out_fds[0]);
++      close(out_fds[1]);
++      return ok;
++   }
++
++   return render_socket_send_reply(&ctx->socket, &reply, sizeof(reply));
+ }
+ 
+ static bool
+@@ -221,6 +245,7 @@ static const struct render_context_dispatch_entry
+       RENDER_CONTEXT_DISPATCH(DESTROY_RESOURCE, destroy_resource, 0),
+       RENDER_CONTEXT_DISPATCH(SUBMIT_CMD, submit_cmd, 0),
+       RENDER_CONTEXT_DISPATCH(SUBMIT_FENCE, submit_fence, 0),
++      RENDER_CONTEXT_DISPATCH(GET_TIMELINE, get_timeline, 0),
+ #undef RENDER_CONTEXT_DISPATCH
+    };
+ 
+diff --git a/server/render_protocol.h b/server/render_protocol.h
+index ed74a1e..fe16583 100644
+--- a/server/render_protocol.h
++++ b/server/render_protocol.h
+@@ -40,6 +40,7 @@ enum render_context_op {
+    RENDER_CONTEXT_OP_SUBMIT_CMD,
+    RENDER_CONTEXT_OP_SUBMIT_FENCE,
+    RENDER_CONTEXT_OP_EXPORT_FENCE,
++   RENDER_CONTEXT_OP_GET_TIMELINE,
+ 
+    RENDER_CONTEXT_OP_COUNT,
+ };
+@@ -207,6 +208,11 @@ struct render_context_op_submit_fence_request {
+    /* TODO fix virgl_renderer_context_create_fence to use ring_index */
+    uint32_t ring_index;
+    uint32_t seqno;
++   uint32_t pad;
++   /* when non-zero, materialize the fence into the context's shared DRM
++    * timeline syncobj at this point (see RENDER_CONTEXT_OP_GET_TIMELINE)
++    */
++   uint64_t timeline_point;
+ };
+ 
+ /* Export a sync_file fd for a previously submitted, not-yet-retired fence.
+@@ -236,6 +242,18 @@ struct render_context_op_export_fence_reply {
+    /* followed by 1 fd if status == RENDER_CONTEXT_EXPORT_FENCE_OK */
+ };
+ 
++/* Get an fd of the context's DRM timeline syncobj, creating the timeline on
++ * first use.  Points on the timeline are materialized by submit_fence
++ * requests carrying a non-zero timeline_point.
++ */
++struct render_context_op_get_timeline_request {
++   struct render_context_op_header header;
++};
++
++struct render_context_op_get_timeline_reply {
++   uint32_t status; /* 0 = ok, followed by 1 syncobj fd; non-zero = error */
++};
++
+ union render_context_op_request {
+    struct render_context_op_header header;
+    struct render_context_op_nop_request nop;
+@@ -246,6 +264,7 @@ union render_context_op_request {
+    struct render_context_op_submit_cmd_request submit_cmd;
+    struct render_context_op_submit_fence_request submit_fence;
+    struct render_context_op_export_fence_request export_fence;
++   struct render_context_op_get_timeline_request get_timeline;
+ };
+ 
+ #ifdef __APPLE__
+diff --git a/server/render_state.c b/server/render_state.c
+index e90a289..633fcee 100644
+--- a/server/render_state.c
++++ b/server/render_state.c
+@@ -224,6 +224,24 @@ render_state_export_fence(uint32_t ctx_id, uint32_t ring_idx, uint64_t fence_id,
+    return vkr_renderer_export_fence(ctx_id, ring_idx, fence_id, out_fd);
+ }
+ 
++bool
++render_state_submit_fence2(uint32_t ctx_id,
++                           uint32_t flags,
++                           uint64_t ring_idx,
++                           uint64_t fence_id,
++                           uint64_t timeline_point)
++{
++   SCOPE_LOCK_RENDERER();
++   return vkr_renderer_submit_fence2(ctx_id, flags, ring_idx, fence_id, timeline_point);
++}
++
++int
++render_state_get_timeline_fd(uint32_t ctx_id, int *out_syncobj_fd, int *out_node_fd)
++{
++   SCOPE_LOCK_RENDERER();
++   return vkr_renderer_get_timeline_fd(ctx_id, out_syncobj_fd, out_node_fd);
++}
++
+ bool
+ render_state_create_resource(uint32_t ctx_id,
+                              uint32_t res_id,
+diff --git a/server/render_state.h b/server/render_state.h
+index e271986..294ccc9 100644
+--- a/server/render_state.h
++++ b/server/render_state.h
+@@ -36,6 +36,19 @@ render_state_submit_fence(uint32_t ctx_id,
+ int
+ render_state_export_fence(uint32_t ctx_id, uint32_t ring_idx, uint64_t fence_id, int *out_fd);
+ 
++bool
++render_state_submit_fence2(uint32_t ctx_id,
++                           uint32_t flags,
++                           uint64_t ring_idx,
++                           uint64_t fence_id,
++                           uint64_t timeline_point);
++
++/* returns 0 and caller-owned fds (timeline syncobj + render node), or
++ * negative errno
++ */
++int
++render_state_get_timeline_fd(uint32_t ctx_id, int *out_syncobj_fd, int *out_node_fd);
++
+ bool
+ render_state_create_resource(uint32_t ctx_id,
+                              uint32_t res_id,
+diff --git a/src/proxy/proxy_context.c b/src/proxy/proxy_context.c
+index b718ef2..ebb9e16 100644
+--- a/src/proxy/proxy_context.c
++++ b/src/proxy/proxy_context.c
+@@ -291,10 +291,11 @@ proxy_context_export_fence(struct virgl_context *base,
+ }
+ 
+ static int
+-proxy_context_submit_fence(struct virgl_context *base,
+-                           uint32_t flags,
+-                           uint32_t ring_idx,
+-                           uint64_t fence_id)
++proxy_context_submit_fence2(struct virgl_context *base,
++                            uint32_t flags,
++                            uint32_t ring_idx,
++                            uint64_t fence_id,
++                            uint64_t timeline_point)
+ {
+    struct proxy_context *ctx = (struct proxy_context *)base;
+    const uint64_t old_busy_mask = ctx->timeline_busy_mask;
+@@ -325,6 +326,7 @@ proxy_context_submit_fence(struct virgl_context *base,
+       .flags = flags,
+       .ring_index = ring_idx,
+       .seqno = fence->seqno,
++      .timeline_point = timeline_point,
+    };
+    if (proxy_socket_send_request(&ctx->socket, &req, sizeof(req)))
+       return 0;
+@@ -344,6 +346,50 @@ proxy_context_submit_fence(struct virgl_context *base,
+    return -1;
+ }
+ 
++static int
++proxy_context_submit_fence(struct virgl_context *base,
++                           uint32_t flags,
++                           uint32_t ring_idx,
++                           uint64_t fence_id)
++{
++   return proxy_context_submit_fence2(base, flags, ring_idx, fence_id, 0);
++}
++
++static int
++proxy_context_get_timeline_fd(struct virgl_context *base,
++                              int *out_syncobj_fd,
++                              int *out_node_fd)
++{
++   struct proxy_context *ctx = (struct proxy_context *)base;
++
++   const struct render_context_op_get_timeline_request req = {
++      .header.op = RENDER_CONTEXT_OP_GET_TIMELINE,
++   };
++   if (!proxy_socket_send_request(&ctx->socket, &req, sizeof(req))) {
++      proxy_log("failed to send get_timeline");
++      return -ENOTCONN;
++   }
++
++   struct render_context_op_get_timeline_reply reply;
++   int reply_fds[2] = { -1, -1 };
++   int reply_fd_count = 0;
++   if (!proxy_socket_receive_reply_with_fds(&ctx->socket, &reply, sizeof(reply),
++                                            reply_fds, 2, &reply_fd_count)) {
++      proxy_log("failed to get get_timeline reply");
++      return -ENOTCONN;
++   }
++
++   if (reply.status || reply_fd_count != 2) {
++      for (int i = 0; i < reply_fd_count; i++)
++         close(reply_fds[i]);
++      return -ENODEV;
++   }
++
++   *out_syncobj_fd = reply_fds[0];
++   *out_node_fd = reply_fds[1];
++   return 0;
++}
++
+ static void
+ proxy_context_retire_fences(struct virgl_context *base)
+ {
+@@ -660,6 +706,8 @@ proxy_context_init_base(struct proxy_context *ctx)
+    ctx->base.retire_fences = proxy_context_retire_fences;
+    ctx->base.submit_fence = proxy_context_submit_fence;
+    ctx->base.export_fence = proxy_context_export_fence;
++   ctx->base.submit_fence2 = proxy_context_submit_fence2;
++   ctx->base.get_timeline_fd = proxy_context_get_timeline_fd;
+ }
+ 
+ static bool
+diff --git a/src/venus/vkr_context.c b/src/venus/vkr_context.c
+index c170bd3..5d5faec 100644
+--- a/src/venus/vkr_context.c
++++ b/src/venus/vkr_context.c
+@@ -5,10 +5,15 @@
+ 
+ #include "vkr_context.h"
+ 
++#include <fcntl.h>
++#include <stdio.h>
++#include <sys/ioctl.h>
+ #include <sys/mman.h>
+ #include <sys/types.h>
+ #include <unistd.h>
+ 
++#include <drm/drm.h>
++
+ #include "util/anon_file.h"
+ #include "venus-protocol/vn_protocol_renderer_dispatches.h"
+ 
+@@ -136,10 +141,11 @@ vkr_context_init_proc_table(struct vkr_context *ctx)
+ }
+ 
+ bool
+-vkr_context_submit_fence(struct vkr_context *ctx,
+-                         uint32_t flags,
+-                         uint32_t ring_idx,
+-                         uint64_t fence_id)
++vkr_context_submit_fence2(struct vkr_context *ctx,
++                          uint32_t flags,
++                          uint32_t ring_idx,
++                          uint64_t fence_id,
++                          uint64_t timeline_point)
+ {
+    /* retire fence on cpu timeline directly */
+    if (ring_idx == 0) {
+@@ -155,11 +161,232 @@ vkr_context_submit_fence(struct vkr_context *ctx,
+    /* always merge fences */
+    assert(!(flags & ~VIRGL_RENDERER_FENCE_FLAG_MERGEABLE));
+    flags = VIRGL_RENDERER_FENCE_FLAG_MERGEABLE;
+-   bool ok = vkr_queue_sync_submit(ctx->sync_queues[ring_idx], flags, ring_idx, fence_id);
++   bool ok = vkr_queue_sync_submit(ctx->sync_queues[ring_idx], flags, ring_idx,
++                                   fence_id, timeline_point);
+ 
+    return ok;
+ }
+ 
++bool
++vkr_context_submit_fence(struct vkr_context *ctx,
++                         uint32_t flags,
++                         uint32_t ring_idx,
++                         uint64_t fence_id)
++{
++   return vkr_context_submit_fence2(ctx, flags, ring_idx, fence_id, 0);
++}
++
++static int
++vkr_context_timeline_reaper(void *arg)
++{
++   struct vkr_context *ctx = arg;
++
++   mtx_lock(&ctx->timeline.mutex);
++   while (true) {
++      while (!ctx->timeline.reaper.count && !ctx->timeline.reaper.join)
++         cnd_wait(&ctx->timeline.reaper.cond, &ctx->timeline.mutex);
++
++      int fds[ARRAY_SIZE(ctx->timeline.reaper.fds)];
++      const uint32_t count = ctx->timeline.reaper.count;
++      memcpy(fds, ctx->timeline.reaper.fds, sizeof(fds[0]) * count);
++      ctx->timeline.reaper.count = 0;
++      const bool join = ctx->timeline.reaper.join;
++      mtx_unlock(&ctx->timeline.mutex);
++
++      for (uint32_t i = 0; i < count; i++)
++         close(fds[i]);
++
++      if (join)
++         return 0;
++      mtx_lock(&ctx->timeline.mutex);
++   }
++}
++
++/* hand a toxic fd to the reaper; falls back to a direct close if the reaper
++ * queue is full or the reaper never started
++ */
++static void
++vkr_context_timeline_reap_fd_locked(struct vkr_context *ctx, int fd)
++{
++   if (!ctx->timeline.reaper.started ||
++       ctx->timeline.reaper.count == ARRAY_SIZE(ctx->timeline.reaper.fds)) {
++      close(fd);
++      return;
++   }
++   ctx->timeline.reaper.fds[ctx->timeline.reaper.count++] = fd;
++   cnd_signal(&ctx->timeline.reaper.cond);
++}
++
++/* Any render node works: syncobjs are containers for driver-agnostic
++ * dma_fences and all syncobj ioctls are DRM_RENDER_ALLOW.  drm_fd == -2
++ * marks a failed earlier attempt.
++ */
++static bool
++vkr_context_timeline_ensure_locked(struct vkr_context *ctx)
++{
++   if (ctx->timeline.handle)
++      return true;
++   if (ctx->timeline.drm_fd == -2)
++      return false;
++
++   for (int minor = 128; minor < 128 + 16; minor++) {
++      char path[64];
++      snprintf(path, sizeof(path), "/dev/dri/renderD%d", minor);
++      int fd = open(path, O_RDWR | O_CLOEXEC);
++      if (fd < 0)
++         continue;
++
++      struct drm_get_cap cap = { .capability = DRM_CAP_SYNCOBJ_TIMELINE };
++      struct drm_syncobj_create create = { 0 };
++      struct drm_syncobj_create scratch = { 0 };
++      if (ioctl(fd, DRM_IOCTL_GET_CAP, &cap) || !cap.value ||
++          ioctl(fd, DRM_IOCTL_SYNCOBJ_CREATE, &create) ||
++          ioctl(fd, DRM_IOCTL_SYNCOBJ_CREATE, &scratch)) {
++         close(fd);
++         continue;
++      }
++
++      ctx->timeline.drm_fd = fd;
++      ctx->timeline.handle = create.handle;
++      ctx->timeline.scratch = scratch.handle;
++
++      if (cnd_init(&ctx->timeline.reaper.cond) == thrd_success) {
++         if (thrd_create(&ctx->timeline.reaper.thread,
++                         vkr_context_timeline_reaper, ctx) == thrd_success)
++            ctx->timeline.reaper.started = true;
++         else
++            cnd_destroy(&ctx->timeline.reaper.cond);
++      }
++      return true;
++   }
++
++   vkr_log("timeline: no syncobj-timeline-capable render node found");
++   ctx->timeline.drm_fd = -2;
++   return false;
++}
++
++int
++vkr_context_get_timeline_fd(struct vkr_context *ctx,
++                            int *out_syncobj_fd,
++                            int *out_node_fd)
++{
++   mtx_lock(&ctx->timeline.mutex);
++   if (!vkr_context_timeline_ensure_locked(ctx)) {
++      mtx_unlock(&ctx->timeline.mutex);
++      return -ENODEV;
++   }
++
++   /* the client also gets a dup of the render-node fd so it can perform
++    * syncobj ioctls without needing (or having permissions on) a /dev/dri
++    * node of its own — fd passing sidesteps path access entirely
++    */
++   struct drm_syncobj_handle args = { .handle = ctx->timeline.handle };
++   const int ret = ioctl(ctx->timeline.drm_fd, DRM_IOCTL_SYNCOBJ_HANDLE_TO_FD, &args);
++   if (ret) {
++      mtx_unlock(&ctx->timeline.mutex);
++      return -errno;
++   }
++
++   const int node_fd = fcntl(ctx->timeline.drm_fd, F_DUPFD_CLOEXEC, 0);
++   mtx_unlock(&ctx->timeline.mutex);
++   if (node_fd < 0) {
++      close(args.fd);
++      return -errno;
++   }
++
++   *out_syncobj_fd = args.fd;
++   *out_node_fd = node_fd;
++   return 0;
++}
++
++void
++vkr_context_timeline_import(struct vkr_context *ctx,
++                            int sync_file_fd,
++                            uint64_t timeline_point)
++{
++   /* NVWD-TL diagnostics */
++#define TL_NOW(slot)                                                         \
++   do {                                                                      \
++      struct timespec _ts;                                                   \
++      clock_gettime(CLOCK_MONOTONIC, &_ts);                                  \
++      t_dbg[slot] = (int64_t)_ts.tv_sec * 1000000000 + _ts.tv_nsec;          \
++   } while (0)
++   int64_t t_dbg[6] = { 0 };
++   struct timespec ts_dbg;
++   TL_NOW(0);
++   const int64_t t0_dbg = t_dbg[0];
++
++   mtx_lock(&ctx->timeline.mutex);
++   TL_NOW(1);
++   /* nothing to do until a client has fetched the timeline */
++   if (!ctx->timeline.handle)
++      goto out;
++
++   const int drm_fd = ctx->timeline.drm_fd;
++   bool imported = false;
++
++   if (sync_file_fd >= 0) {
++      /* Two-step import (portable to kernels without the one-ioctl timeline
++       * sync_file import) via the PERSISTENT scratch binary syncobj:
++       * IMPORT_SYNC_FILE replaces its fence, then transfer to the timeline
++       * point.  No per-import create/destroy — SYNCOBJ_CREATE stalls 8-13 ms
++       * inside the render worker (root cause under investigation).
++       */
++      struct drm_syncobj_handle import = {
++         .handle = ctx->timeline.scratch,
++         .flags = DRM_SYNCOBJ_FD_TO_HANDLE_FLAGS_IMPORT_SYNC_FILE,
++         .fd = sync_file_fd,
++      };
++      struct drm_syncobj_transfer xfer = {
++         .src_handle = ctx->timeline.scratch,
++         .dst_handle = ctx->timeline.handle,
++         .dst_point = timeline_point,
++      };
++      const bool i_ok = !ioctl(drm_fd, DRM_IOCTL_SYNCOBJ_FD_TO_HANDLE, &import);
++      TL_NOW(2);
++      imported = i_ok && !ioctl(drm_fd, DRM_IOCTL_SYNCOBJ_TRANSFER, &xfer);
++      TL_NOW(3);
++   }
++
++   if (!imported) {
++      /* fd < 0 = fence already signaled; also the failure fallback so the
++       * client never stalls on WAIT_AVAILABLE
++       */
++      if (sync_file_fd >= 0)
++         vkr_log("timeline: import at point %" PRIu64 " failed, signaling",
++                 timeline_point);
++      const uint64_t point = timeline_point;
++      const uint32_t handle = ctx->timeline.handle;
++      struct drm_syncobj_timeline_array signal = {
++         .handles = (uintptr_t)&handle,
++         .points = (uintptr_t)&point,
++         .count_handles = 1,
++      };
++      ioctl(drm_fd, DRM_IOCTL_SYNCOBJ_TIMELINE_SIGNAL, &signal);
++   }
++
++   if (sync_file_fd >= 0) {
++      vkr_context_timeline_reap_fd_locked(ctx, sync_file_fd);
++      sync_file_fd = -1;
++   }
++
++out:
++   mtx_unlock(&ctx->timeline.mutex);
++   if (sync_file_fd >= 0)
++      close(sync_file_fd);
++
++   TL_NOW(4);
++   (void)ts_dbg;
++   if (t_dbg[4] - t0_dbg > 2000000)
++      vkr_log("NVWD-TL slow import point %" PRIu64 ": lock %" PRId64
++              " fd2h %" PRId64 " xfer %" PRId64 " tail %" PRId64 " us",
++              timeline_point, (t_dbg[1] - t_dbg[0]) / 1000,
++              t_dbg[2] ? (t_dbg[2] - t_dbg[1]) / 1000 : -1,
++              t_dbg[3] ? (t_dbg[3] - t_dbg[2]) / 1000 : -1,
++              (t_dbg[4] - (t_dbg[3] ? t_dbg[3] : t_dbg[1])) / 1000);
++#undef TL_NOW
++}
++
+ int
+ vkr_context_export_fence(struct vkr_context *ctx,
+                          uint32_t ring_idx,
+@@ -644,6 +871,24 @@ vkr_context_destroy(struct vkr_context *ctx)
+ 
+    vkr_context_wait_ring_fini(ctx);
+ 
++   if (ctx->timeline.reaper.started) {
++      mtx_lock(&ctx->timeline.mutex);
++      ctx->timeline.reaper.join = true;
++      cnd_signal(&ctx->timeline.reaper.cond);
++      mtx_unlock(&ctx->timeline.mutex);
++      thrd_join(ctx->timeline.reaper.thread, NULL);
++      cnd_destroy(&ctx->timeline.reaper.cond);
++   }
++   if (ctx->timeline.handle) {
++      struct drm_syncobj_destroy destroy = { .handle = ctx->timeline.handle };
++      ioctl(ctx->timeline.drm_fd, DRM_IOCTL_SYNCOBJ_DESTROY, &destroy);
++      destroy.handle = ctx->timeline.scratch;
++      ioctl(ctx->timeline.drm_fd, DRM_IOCTL_SYNCOBJ_DESTROY, &destroy);
++   }
++   if (ctx->timeline.drm_fd >= 0)
++      close(ctx->timeline.drm_fd);
++   mtx_destroy(&ctx->timeline.mutex);
++
+    if (ctx->ring_monitor.started)
+       vkr_context_ring_monitor_fini(ctx);
+ 
+@@ -727,6 +972,11 @@ vkr_context_create(uint32_t ctx_id,
+    if (!vkr_context_wait_ring_init(ctx))
+       goto err_ctx_wait_ring_init;
+ 
++   if (mtx_init(&ctx->timeline.mutex, mtx_plain) != thrd_success)
++      goto err_ctx_wait_ring_init;
++   ctx->timeline.drm_fd = -1;
++   ctx->timeline.handle = 0;
++
+    if (mtx_init(&ctx->object_mutex, mtx_plain) != thrd_success)
+       goto err_ctx_object_mutex;
+ 
+diff --git a/src/venus/vkr_context.h b/src/venus/vkr_context.h
+index 7ba72eb..bb21363 100644
+--- a/src/venus/vkr_context.h
++++ b/src/venus/vkr_context.h
+@@ -98,6 +98,37 @@ struct vkr_context {
+ 
+    struct vkr_queue *sync_queues[64];
+ 
++   /* Shared DRM timeline syncobj: fences submitted with a timeline_point are
++    * materialized (GetFenceFdKHR + import) at that point right after
++    * QueueSubmit, so a client sharing the syncobj can export per-point
++    * sync_files locally.  Lazily created on first get_timeline_fd.
++    */
++   struct {
++      mtx_t mutex;
++      int drm_fd;      /* render node used for syncobj ioctls, -1 = none */
++      uint32_t handle; /* timeline syncobj handle, 0 = not created */
++      /* persistent scratch binary syncobj for sync_file -> timeline-point
++       * imports: IMPORT_SYNC_FILE replaces its fence each time, so no
++       * per-import create/destroy (SYNCOBJ_CREATE is unexplainably slow -
++       * 8-13 ms - inside the render worker; see STATE.md 2026-07-12)
++       */
++      uint32_t scratch;
++
++      /* Closing an NVIDIA sync_file defers its fence teardown (which sleeps
++       * in synchronize_rcu, ~10 ms) into task_work that runs on the closing
++       * thread's next syscall return — poisoning the dispatch thread's
++       * latency.  A reaper thread absorbs the closes instead.
++       */
++      struct {
++         thrd_t thread;
++         cnd_t cond;
++         bool started;
++         bool join;
++         int fds[64];
++         uint32_t count;
++      } reaper;
++   } timeline;
++
+    struct vkr_instance *instance;
+    char *instance_name;
+ 
+@@ -130,6 +161,30 @@ vkr_context_submit_fence(struct vkr_context *ctx,
+                          uint32_t ring_idx,
+                          uint64_t fence_id);
+ 
++/* like vkr_context_submit_fence; timeline_point != 0 also materializes the
++ * fence into ctx->timeline at that point
++ */
++bool
++vkr_context_submit_fence2(struct vkr_context *ctx,
++                          uint32_t flags,
++                          uint32_t ring_idx,
++                          uint64_t fence_id,
++                          uint64_t timeline_point);
++
++/* returns 0 and caller-owned fds (timeline syncobj + render node for syncobj
++ * ioctls), or negative errno
++ */
++int
++vkr_context_get_timeline_fd(struct vkr_context *ctx,
++                            int *out_syncobj_fd,
++                            int *out_node_fd);
++
++/* consumes sync_file_fd; called by vkr_queue with a materialized fence fd */
++void
++vkr_context_timeline_import(struct vkr_context *ctx,
++                            int sync_file_fd,
++                            uint64_t timeline_point);
++
+ bool
+ vkr_context_submit_cmd(struct vkr_context *ctx, const void *buffer, size_t size);
+ 
 diff --git a/src/venus/vkr_device.c b/src/venus/vkr_device.c
 index 3e943bf..3880c3e 100644
 --- a/src/venus/vkr_device.c
@@ -60,6 +679,239 @@ index 3e943bf..3880c3e 100644
        free(exts);
        free(dev);
        return;
+diff --git a/src/venus/vkr_queue.c b/src/venus/vkr_queue.c
+index b7242e0..4287de8 100644
+--- a/src/venus/vkr_queue.c
++++ b/src/venus/vkr_queue.c
+@@ -79,7 +79,8 @@ bool
+ vkr_queue_sync_submit(struct vkr_queue *queue,
+                       uint32_t flags,
+                       uint32_t ring_idx,
+-                      uint64_t fence_id)
++                      uint64_t fence_id,
++                      uint64_t timeline_point)
+ {
+    TRACE_FUNC();
+    struct vkr_device *dev = queue->device;
+@@ -103,6 +104,26 @@ vkr_queue_sync_submit(struct vkr_queue *queue,
+       return false;
+    }
+ 
++   /* Materialize the fresh fence into the context's shared timeline: SYNC_FD
++    * export has copy transference and the fence has a pending signal op, so
++    * exporting right after QueueSubmit is spec-legal.  fd == -1 (already
++    * signaled) and errors both make vkr_context_timeline_import signal the
++    * point directly.
++    */
++   if (timeline_point) {
++      int fd = -1;
++      if (dev->physical_device->KHR_external_fence_fd && !sync->device_lost) {
++         const VkFenceGetFdInfoKHR info = {
++            .sType = VK_STRUCTURE_TYPE_FENCE_GET_FD_INFO_KHR,
++            .fence = sync->fence,
++            .handleType = VK_EXTERNAL_FENCE_HANDLE_TYPE_SYNC_FD_BIT,
++         };
++         if (vk->GetFenceFdKHR(dev->base.handle.device, &info, &fd) != VK_SUCCESS)
++            fd = -1;
++      }
++      vkr_context_timeline_import(queue->context, fd, timeline_point);
++   }
++
+    mtx_lock(&queue->sync_thread.mutex);
+    list_addtail(&sync->head, &queue->sync_thread.syncs);
+    cnd_signal(&queue->sync_thread.cond);
+diff --git a/src/venus/vkr_queue.h b/src/venus/vkr_queue.h
+index 5246a5a..9c802ad 100644
+--- a/src/venus/vkr_queue.h
++++ b/src/venus/vkr_queue.h
+@@ -95,10 +95,14 @@ vkr_queue_destroy(struct vkr_context *ctx, struct vkr_queue *queue);
+ int
+ vkr_queue_export_fence_sync_file(struct vkr_queue *queue, uint64_t fence_id, int *out_fd);
+ 
++/* timeline_point != 0 also materializes the fence into the context's shared
++ * timeline syncobj at that point (see vkr_context_timeline_import)
++ */
+ bool
+ vkr_queue_sync_submit(struct vkr_queue *queue,
+                       uint32_t flags,
+                       uint32_t ring_idx,
+-                      uint64_t fence_id);
++                      uint64_t fence_id,
++                      uint64_t timeline_point);
+ 
+ #endif /* VKR_QUEUE_H */
+diff --git a/src/venus/vkr_renderer.c b/src/venus/vkr_renderer.c
+index d7eaab3..b963180 100644
+--- a/src/venus/vkr_renderer.c
++++ b/src/venus/vkr_renderer.c
+@@ -183,6 +183,35 @@ vkr_renderer_submit_fence(uint32_t ctx_id,
+    return vkr_context_submit_fence(ctx, flags, ring_idx, fence_id);
+ }
+ 
++bool
++vkr_renderer_submit_fence2(uint32_t ctx_id,
++                           uint32_t flags,
++                           uint64_t ring_idx,
++                           uint64_t fence_id,
++                           uint64_t timeline_point)
++{
++   TRACE_FUNC();
++
++   struct vkr_context *ctx = vkr_renderer_lookup_context(ctx_id);
++   if (!ctx)
++      return false;
++
++   assert(vkr_state.cbs->retire_fence);
++   return vkr_context_submit_fence2(ctx, flags, ring_idx, fence_id, timeline_point);
++}
++
++int
++vkr_renderer_get_timeline_fd(uint32_t ctx_id, int *out_syncobj_fd, int *out_node_fd)
++{
++   TRACE_FUNC();
++
++   struct vkr_context *ctx = vkr_renderer_lookup_context(ctx_id);
++   if (!ctx)
++      return -EINVAL;
++
++   return vkr_context_get_timeline_fd(ctx, out_syncobj_fd, out_node_fd);
++}
++
+ bool
+ vkr_renderer_create_resource(uint32_t ctx_id,
+                              uint32_t res_id,
+diff --git a/src/venus/vkr_renderer.h b/src/venus/vkr_renderer.h
+index b606ce6..81173c5 100644
+--- a/src/venus/vkr_renderer.h
++++ b/src/venus/vkr_renderer.h
+@@ -57,6 +57,22 @@ vkr_renderer_submit_fence(uint32_t ctx_id,
+                           uint64_t ring_idx,
+                           uint64_t fence_id);
+ 
++/* like vkr_renderer_submit_fence; timeline_point != 0 also materializes the
++ * fence into the context's shared timeline syncobj at that point
++ */
++bool
++vkr_renderer_submit_fence2(uint32_t ctx_id,
++                           uint32_t flags,
++                           uint64_t ring_idx,
++                           uint64_t fence_id,
++                           uint64_t timeline_point);
++
++/* returns 0 and caller-owned fds (timeline syncobj + render node), or
++ * negative errno
++ */
++int
++vkr_renderer_get_timeline_fd(uint32_t ctx_id, int *out_syncobj_fd, int *out_node_fd);
++
+ bool
+ vkr_renderer_create_resource(uint32_t ctx_id,
+                              uint32_t res_id,
+diff --git a/src/virgl_context.h b/src/virgl_context.h
+index 5db5cc3..c011d5a 100644
+--- a/src/virgl_context.h
++++ b/src/virgl_context.h
+@@ -140,6 +140,25 @@ struct virgl_context {
+                        uint64_t fence_id,
+                        int *out_fd);
+ 
++   /* Like submit_fence, but additionally materialize the fence into the
++    * context's shared DRM timeline syncobj at the given point (see
++    * get_timeline_fd).  Optional.
++    */
++   int (*submit_fence2)(struct virgl_context *ctx,
++                        uint32_t flags,
++                        uint32_t ring_idx,
++                        uint64_t fence_id,
++                        uint64_t timeline_point);
++
++   /* Return fds of the context's DRM timeline syncobj and of a render node
++    * usable for syncobj ioctls on it, creating the timeline on first use.
++    * The caller owns the returned fds.  Points are materialized by
++    * submit_fence2.  Optional.
++    */
++   int (*get_timeline_fd)(struct virgl_context *ctx,
++                          int *out_syncobj_fd,
++                          int *out_node_fd);
++
+    /* For DRM native contexts, return the device fd: */
+    int (*get_device_fd)(struct virgl_context *ctx);
+ 
+diff --git a/src/virglrenderer.c b/src/virglrenderer.c
+index c82b916..b7fa762 100644
+--- a/src/virglrenderer.c
++++ b/src/virglrenderer.c
+@@ -449,6 +449,36 @@ int virgl_renderer_context_export_fence(uint32_t ctx_id,
+    return ctx->export_fence(ctx, ring_idx, fence_id, fd);
+ }
+ 
++int virgl_renderer_context_create_fence2(uint32_t ctx_id,
++                                         uint32_t flags,
++                                         uint32_t ring_idx,
++                                         uint64_t fence_id,
++                                         uint64_t timeline_point)
++{
++   TRACE_FUNC();
++   struct virgl_context *ctx = virgl_context_lookup(ctx_id);
++   if (!ctx)
++      return -EINVAL;
++   if (!ctx->submit_fence2)
++      return -ENOTSUP;
++
++   assert(state.cbs->version >= 3 && state.cbs->write_context_fence);
++   return ctx->submit_fence2(ctx, flags, ring_idx, fence_id, timeline_point);
++}
++
++int virgl_renderer_context_get_timeline_fd(uint32_t ctx_id,
++                                           int *syncobj_fd,
++                                           int *node_fd)
++{
++   TRACE_FUNC();
++   struct virgl_context *ctx = virgl_context_lookup(ctx_id);
++   if (!ctx)
++      return -EINVAL;
++   if (!ctx->get_timeline_fd)
++      return -ENOTSUP;
++   return ctx->get_timeline_fd(ctx, syncobj_fd, node_fd);
++}
++
+ void virgl_renderer_context_poll(uint32_t ctx_id)
+ {
+    TRACE_FUNC();
+diff --git a/src/virglrenderer.h b/src/virglrenderer.h
+index f59dd9a..d928b12 100644
+--- a/src/virglrenderer.h
++++ b/src/virglrenderer.h
+@@ -467,6 +467,29 @@ VIRGL_EXPORT int virgl_renderer_context_export_fence(uint32_t ctx_id,
+                                                      uint64_t fence_id,
+                                                      int *fd);
+ 
++/*
++ * Like virgl_renderer_context_create_fence, but additionally materialize the
++ * fence into the context's shared DRM timeline syncobj at timeline_point
++ * (venus contexts only).  Callers obtain the timeline via
++ * virgl_renderer_context_get_timeline_fd and share it with the client, which
++ * can then export per-point sync_files locally without further IPC.
++ */
++VIRGL_EXPORT int virgl_renderer_context_create_fence2(uint32_t ctx_id,
++                                                      uint32_t flags,
++                                                      uint32_t ring_idx,
++                                                      uint64_t fence_id,
++                                                      uint64_t timeline_point);
++
++/*
++ * Return fds of the context's DRM timeline syncobj and of a render node
++ * usable for syncobj ioctls on it, creating the timeline on first use (venus
++ * contexts only).  The caller owns both fds.  Returns 0 on success, negative
++ * on error.
++ */
++VIRGL_EXPORT int virgl_renderer_context_get_timeline_fd(uint32_t ctx_id,
++                                                        int *syncobj_fd,
++                                                        int *node_fd);
++
+ VIRGL_EXPORT void virgl_renderer_context_poll(uint32_t ctx_id); /* force fences */
+ VIRGL_EXPORT int virgl_renderer_context_get_poll_fd(uint32_t ctx_id);
+ 
 diff --git a/vtest/meson.build b/vtest/meson.build
 index c2bd278..387084f 100644
 --- a/vtest/meson.build
@@ -74,20 +926,23 @@ index c2bd278..387084f 100644
     'vtest.h'
  ]
 diff --git a/vtest/vtest.h b/vtest/vtest.h
-index fa74075..730ce10 100644
+index fa74075..997ac94 100644
 --- a/vtest/vtest.h
 +++ b/vtest/vtest.h
-@@ -57,6 +57,9 @@ int vtest_get_context_poll_fd(struct vtest_context *ctx);
+@@ -57,6 +57,12 @@ int vtest_get_context_poll_fd(struct vtest_context *ctx);
  
  void vtest_set_current_context(struct vtest_context *ctx);
  
 +/* VTEST_STATS instrumentation (vtest_server.c) */
 +void vtest_stats_count_import(bool query_only);
 +
++int vtest_submit_cmd2_timeline(uint32_t length_dw);
++int vtest_timeline_get(uint32_t length_dw);
++
  int vtest_send_caps(uint32_t length_dw);
  int vtest_send_caps2(uint32_t length_dw);
  int vtest_create_resource(uint32_t length_dw);
-@@ -96,6 +99,7 @@ int vtest_sync_write(uint32_t length_dw);
+@@ -96,6 +102,7 @@ int vtest_sync_write(uint32_t length_dw);
  int vtest_sync_wait(uint32_t length_dw);
  int vtest_sync_export_sync_file(uint32_t length_dw);
  int vtest_resource_import_blob(uint32_t length_dw);
@@ -96,19 +951,35 @@ index fa74075..730ce10 100644
  int vtest_submit_cmd2(uint32_t length_dw);
  
 diff --git a/vtest/vtest_protocol.h b/vtest/vtest_protocol.h
-index 3a7381f..b8f9f4a 100644
+index 3a7381f..81a73a7 100644
 --- a/vtest/vtest_protocol.h
 +++ b/vtest/vtest_protocol.h
-@@ -98,6 +98,8 @@
+@@ -98,6 +98,15 @@
  #define VCMD_SYNC_EXPORT_SYNC_FILE 39
  /* import a dmabuf fd as a blob resource attached to the context */
  #define VCMD_RESOURCE_IMPORT_BLOB 40
 +/* allocate a gralloc buffer on the host render GPU, reply with its dma_buf */
 +#define VCMD_RESOURCE_ALLOC_GPU 41
++/* get the context's shared DRM timeline syncobj (reply: status + 1 fd) */
++#define VCMD_TIMELINE_GET 42
++/* submit_cmd2 whose fence also materializes a timeline point:
++ * payload = {point_lo, point_hi} followed by a regular submit_cmd2 payload;
++ * the point applies to the last fence-creating batch
++ */
++#define VCMD_SUBMIT_CMD2_TIMELINE 43
  
  #define VCMD_RES_CREATE_SIZE 10
  #define VCMD_RES_CREATE_RES_HANDLE 0 /* must be 0 since protocol version 3 */
-@@ -262,6 +264,30 @@ enum vcmd_sync_export_sync_file_status {
+@@ -170,6 +179,8 @@ enum vcmd_param  {
+    VCMD_PARAM_HAS_TIMELINE_SYNCOBJ = 2,
+    /* server supports VCMD_SYNC_EXPORT_SYNC_FILE for venus sync points */
+    VCMD_PARAM_HAS_VENUS_SYNC_FD = 3,
++   /* server supports VCMD_TIMELINE_GET + VCMD_SUBMIT_CMD2_TIMELINE */
++   VCMD_PARAM_HAS_TIMELINE_FENCE = 4,
+ };
+ #define VCMD_GET_PARAM_SIZE 1
+ #define VCMD_GET_PARAM_PARAM 0
+@@ -262,6 +273,30 @@ enum vcmd_sync_export_sync_file_status {
  #define VCMD_RESOURCE_IMPORT_BLOB_SIZE_HI 1
  /* followed by 1 fd; resp res_id (0 = failure) */
  
@@ -140,7 +1011,7 @@ index 3a7381f..b8f9f4a 100644
     VCMD_SUBMIT_CMD2_FLAG_RING_IDX = 1 << 0,
     VCMD_SUBMIT_CMD2_FLAG_IN_FENCE_FD = 1 << 1,
 diff --git a/vtest/vtest_renderer.c b/vtest/vtest_renderer.c
-index f3212ad..ab17a57 100644
+index f3212ad..681f2cf 100644
 --- a/vtest/vtest_renderer.c
 +++ b/vtest/vtest_renderer.c
 @@ -53,6 +53,7 @@
@@ -151,7 +1022,56 @@ index f3212ad..ab17a57 100644
  #include "vtest_protocol.h"
  #include "threadpool.h"
  
-@@ -2439,6 +2440,7 @@ int vtest_resource_import_blob(uint32_t length_dw)
+@@ -970,6 +971,15 @@ int vtest_get_param(UNUSED uint32_t length_dw)
+       resp[0] = true;
+       resp[1] = !!(renderer.ctx_flags & VIRGL_RENDERER_VENUS);
+       break;
++   case VCMD_PARAM_HAS_TIMELINE_FENCE:
++      /* the client falls back to VCMD_SYNC_EXPORT_SYNC_FILE if
++       * VCMD_TIMELINE_GET fails at runtime (e.g. no capable render node);
++       * VTEST_NO_TIMELINE force-disables for bisection
++       */
++      resp[0] = true;
++      resp[1] = !!(renderer.ctx_flags & VIRGL_RENDERER_VENUS) &&
++                !getenv("VTEST_NO_TIMELINE");
++      break;
+    case VCMD_PARAM_HAS_TIMELINE_SYNCOBJ: {
+ #ifdef ENABLE_DRM
+       int fd = virgl_renderer_get_dev_fd(ctx->ctx_id);
+@@ -2238,7 +2248,8 @@ struct drm_virtgpu_execbuffer_syncobj {
+ static int vtest_submit_cmd2_batch(struct vtest_context *ctx,
+                                    const struct vcmd_submit_cmd2_batch *batch,
+                                    const uint32_t *cmds,
+-                                   const uint32_t *syncs)
++                                   const uint32_t *syncs,
++                                   uint64_t timeline_point)
+ {
+    struct vtest_timeline_submit *submit = NULL;
+    struct drm_virtgpu_execbuffer_syncobj *in_syncobj = NULL, *out_syncobj = NULL;
+@@ -2361,10 +2372,18 @@ static int vtest_submit_cmd2_batch(struct vtest_context *ctx,
+       uint64_t fence_id = (uintptr_t)submit;
+ 
+       submit->timeline = timeline;
+-      ret = virgl_renderer_context_create_fence(ctx->ctx_id,
+-                                                VIRGL_RENDERER_FENCE_FLAG_MERGEABLE,
+-                                                batch->ring_idx,
+-                                                fence_id);
++      if (timeline_point) {
++         ret = virgl_renderer_context_create_fence2(ctx->ctx_id,
++                                                    VIRGL_RENDERER_FENCE_FLAG_MERGEABLE,
++                                                    batch->ring_idx,
++                                                    fence_id,
++                                                    timeline_point);
++      } else {
++         ret = virgl_renderer_context_create_fence(ctx->ctx_id,
++                                                   VIRGL_RENDERER_FENCE_FLAG_MERGEABLE,
++                                                   batch->ring_idx,
++                                                   fence_id);
++      }
+       if (ret) {
+          vtest_free_timeline_submit(submit);
+          goto out;
+@@ -2439,6 +2458,7 @@ int vtest_resource_import_blob(uint32_t length_dw)
     /* venus imports with size 0 when only querying memory properties (see
      * vn_get_memory_dma_buf_properties); derive the size from the dmabuf
      */
@@ -159,7 +1079,7 @@ index f3212ad..ab17a57 100644
     if (!size) {
        const off_t seek_size = lseek(fd, 0, SEEK_END);
        if (seek_size < 0) {
-@@ -2491,6 +2493,64 @@ int vtest_resource_import_blob(uint32_t length_dw)
+@@ -2491,6 +2511,64 @@ int vtest_resource_import_blob(uint32_t length_dw)
     return vtest_block_write(ctx->out_fd, resp_buf, sizeof(resp_buf)) >= 0 ? 0 : -1;
  }
  
@@ -224,8 +1144,88 @@ index f3212ad..ab17a57 100644
  int vtest_sync_export_sync_file(uint32_t length_dw)
  {
     struct vtest_context *ctx = vtest_get_current_context();
+@@ -2560,7 +2638,7 @@ int vtest_sync_export_sync_file(uint32_t length_dw)
+    return ret >= 0 ? 0 : ret;
+ }
+ 
+-int vtest_submit_cmd2(uint32_t length_dw)
++static int vtest_submit_cmd2_common(uint32_t length_dw, uint64_t timeline_point)
+ {
+    struct vtest_context *ctx = vtest_get_current_context();
+    uint32_t *submit_cmd2_buf;
+@@ -2611,7 +2689,9 @@ int vtest_submit_cmd2(uint32_t length_dw)
+          return -EINVAL;
+       }
+ 
+-      ret = vtest_submit_cmd2_batch(ctx, &batch, cmds, syncs);
++      /* the timeline point applies to the last fence-creating batch */
++      const uint64_t point = (i == batch_count - 1) ? timeline_point : 0;
++      ret = vtest_submit_cmd2_batch(ctx, &batch, cmds, syncs, point);
+       if (ret) {
+          free(submit_cmd2_buf);
+          return ret;
+@@ -2623,6 +2703,59 @@ int vtest_submit_cmd2(uint32_t length_dw)
+    return 0;
+ }
+ 
++int vtest_submit_cmd2(uint32_t length_dw)
++{
++   return vtest_submit_cmd2_common(length_dw, 0);
++}
++
++int vtest_submit_cmd2_timeline(uint32_t length_dw)
++{
++   struct vtest_context *ctx = vtest_get_current_context();
++   uint32_t point_buf[2];
++   int ret;
++
++   if (length_dw < 2)
++      return -EINVAL;
++
++   ret = ctx->input->read(ctx->input, point_buf, sizeof(point_buf));
++   if (ret != sizeof(point_buf))
++      return -1;
++
++   const uint64_t point = point_buf[0] | (uint64_t)point_buf[1] << 32;
++   if (!point)
++      return -EINVAL;
++
++   return vtest_submit_cmd2_common(length_dw - 2, point);
++}
++
++int vtest_timeline_get(UNUSED uint32_t length_dw)
++{
++   struct vtest_context *ctx = vtest_get_current_context();
++   uint32_t resp_buf[VTEST_HDR_SIZE + 1];
++   int fds[2] = { -1, -1 };
++   int ret;
++
++   /* on success two fds follow the reply: timeline syncobj, render node */
++   ret = virgl_renderer_context_get_timeline_fd(ctx->ctx_id, &fds[0], &fds[1]);
++
++   resp_buf[VTEST_CMD_LEN] = 1;
++   resp_buf[VTEST_CMD_ID] = VCMD_TIMELINE_GET;
++   resp_buf[VTEST_CMD_DATA_START] = ret ? 1 : 0;
++   ret = vtest_block_write(ctx->out_fd, resp_buf, sizeof(resp_buf));
++   if (ret >= 0 && fds[0] >= 0) {
++      ret = vtest_send_fd(ctx->out_fd, fds[0]);
++      if (ret >= 0)
++         ret = vtest_send_fd(ctx->out_fd, fds[1]);
++   }
++
++   for (int i = 0; i < 2; i++) {
++      if (fds[i] >= 0)
++         close(fds[i]);
++   }
++
++   return ret >= 0 ? 0 : ret;
++}
++
+ #ifdef ENABLE_DRM
+ 
+ int vtest_drm_sync_create(UNUSED uint32_t length_dw)
 diff --git a/vtest/vtest_server.c b/vtest/vtest_server.c
-index dcf1b19..fd5f335 100644
+index dcf1b19..269e67d 100644
 --- a/vtest/vtest_server.c
 +++ b/vtest/vtest_server.c
 @@ -33,12 +33,16 @@
@@ -306,11 +1306,13 @@ index dcf1b19..fd5f335 100644
           vtest_poll_context(client->context);
           client->context_need_poll = false;
        }
-@@ -732,8 +776,32 @@ static const struct vtest_command {
+@@ -732,8 +776,34 @@ static const struct vtest_command {
     HANDLER(RESOURCE_EXPORT_FD,          resource_export_fd,        true   ),
     HANDLER(SYNC_EXPORT_SYNC_FILE,       sync_export_sync_file,     true   ),
     HANDLER(RESOURCE_IMPORT_BLOB,        resource_import_blob,      true   ),
 +   HANDLER(RESOURCE_ALLOC_GPU,          resource_alloc_gpu,        false  ),
++   HANDLER(TIMELINE_GET,                timeline_get,              true   ),
++   HANDLER(SUBMIT_CMD2_TIMELINE,        submit_cmd2_timeline,      true   ),
  };
  
 +static void vtest_stats_dump(void)
@@ -339,7 +1341,7 @@ index dcf1b19..fd5f335 100644
  static int vtest_client_dispatch_commands(struct vtest_client *client)
  {
     TRACE_FUNC();
-@@ -766,6 +834,8 @@ static int vtest_client_dispatch_commands(struct vtest_client *client)
+@@ -766,6 +836,8 @@ static int vtest_client_dispatch_commands(struct vtest_client *client)
  
     vtest_poll_resource_busy_wait();
     if (header[1] <= 0 || header[1] >= ARRAY_SIZE(vtest_commands)) {
@@ -348,7 +1350,7 @@ index dcf1b19..fd5f335 100644
        return VTEST_CLIENT_ERROR_COMMAND_ID;
     }
  
-@@ -785,8 +855,30 @@ static int vtest_client_dispatch_commands(struct vtest_client *client)
+@@ -785,8 +857,30 @@ static int vtest_client_dispatch_commands(struct vtest_client *client)
  
     vtest_set_current_context(client->context);
  
