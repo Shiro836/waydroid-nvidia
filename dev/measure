@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# measure — the canonical smoothness bench: fling the launcher and read HWUI
+# frame stats. Numbers go in STATE.md's Log. Requires a booted stack.
+# Usage: dev/measure            (launcher fling, 5 back-and-forth swipes)
+#        dev/measure <pkg>      (bench a specific package instead)
+source "$(dirname "$(readlink -f "$0")")/env.sh"
+need_sudo
+
+PKG="${1:-com.android.launcher3}"
+
+say "fling bench: $PKG (waking, homing, 5x swipe)"
+guest "
+  input keyevent KEYCODE_WAKEUP; input keyevent KEYCODE_MENU; sleep 1
+  input keyevent KEYCODE_HOME; sleep 1
+  dumpsys gfxinfo $PKG reset >/dev/null
+  for i in 1 2 3 4 5; do
+    input swipe 2000 700 500 700 100; sleep 0.5
+    input swipe 500 700 2000 700 100; sleep 0.5
+  done
+  dumpsys gfxinfo $PKG | grep -E 'Total frames|Janky frames|50th|90th|95th|99th'
+"
+echo
+echo "DoD @250Hz: median<=4ms p95<=4ms janky<5% | baseline 2026-07-11: median 6ms p90 10ms p99 14ms janky 19.8%"

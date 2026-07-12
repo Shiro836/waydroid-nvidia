@@ -1,18 +1,42 @@
 #!/usr/bin/env bash
+# build/hwcomposer/build.sh [SRCDIR] [OUTDIR]
 # Standalone NDK build of hwcomposer.waydroid.so (waydroid hwcomposer, vendor
 # module) against headers from AOSP android-13 clones and the image's own
-# shared libraries. No AOSP build system required.
+# shared libraries. No AOSP build system required. Produces both the .so and a
+# stripped .so. The ONE hwcomposer recipe (dev/build + packaging/aur).
+#
+# PREREQS (hand-provisioned today; see packaging/aur/PREREQS.md — the remaining
+# gap before a fully clean-room build). All under $WNV by default:
+#   aosp_* shallow header clones (libhidl, libhwbinder, fmq, system_core,
+#     frameworks_native, libbase, libhardware, ...), android_system_logging,
+#     hidl-out (our hidl-gen output), ndk-prefix (static wayland/ffi/xkbcommon),
+#     minigbm, mesa/subprojects/libdrm-*. Plus the image rootfs for -l links.
+#
+# Env: WNV (prereq root, default ~/repos/waydroid-nv), ROOTFS (image libs,
+#      default /var/lib/waydroid/rootfs), NDK (default /opt/android-ndk).
 set -e
-cd "$(dirname "$0")"
+HERE="$(cd "$(dirname "$0")" && pwd)"
 
-WNV=$HOME/repos/waydroid-nv
-NDK=/opt/android-ndk/toolchains/llvm/prebuilt/linux-x86_64/bin
-CXX=$NDK/x86_64-linux-android34-clang++
-CC=$NDK/x86_64-linux-android34-clang
-SRC=$WNV/hwcomposer-src/hwcomposer
-GEN=$PWD/gen
-OUT=$PWD/out
-ROOTFS=/var/lib/waydroid/rootfs
+WNV="${WNV:-$HOME/repos/waydroid-nv}"
+ROOTFS="${ROOTFS:-/var/lib/waydroid/rootfs}"
+NDK="${NDK:-/opt/android-ndk}/toolchains/llvm/prebuilt/linux-x86_64/bin"
+CXX="$NDK/x86_64-linux-android34-clang++"
+CC="$NDK/x86_64-linux-android34-clang"
+STRIP="$NDK/llvm-strip"
+
+SRC="${1:-$WNV/hwcomposer-src/hwcomposer}"
+OUT="${2:-$HERE/out}"
+GEN="$HERE/gen"
+
+# The final link resolves vendor.waydroid.*.so from the image rootfs, which is
+# only present when the container has been started at least once.
+[ -e "$ROOTFS/vendor/lib64/vendor.waydroid.display@1.0.so" ] || {
+    echo "hwcomposer/build.sh: $ROOTFS/vendor/lib64 has no image libs." >&2
+    echo "  Start the container once so rootfs mounts (dev/restart), or set" >&2
+    echo "  ROOTFS to an unpacked vendor image. (Objects will compile but the" >&2
+    echo "  link needs the vendor.waydroid HIDL libs.)" >&2
+    exit 1
+}
 
 mkdir -p "$OUT"
 
@@ -53,10 +77,10 @@ DEFS=(
   -D__ANDROID_USE_LIBLOG_SAFETY_NET=0
 )
 
-CXXFLAGS=(-O2 -fPIC -std=c++17 -isystem "$PWD/libcxx-override" -Wall -Wno-unused-parameter -Wno-deprecated-declarations -fno-exceptions -fno-rtti)
+CXXFLAGS=(-O2 -fPIC -std=c++17 -isystem "$HERE/libcxx-override" -Wall -Wno-unused-parameter -Wno-deprecated-declarations -fno-exceptions -fno-rtti)
 
 SRCS=(
-  "$PWD/libcxx_compat.cpp"
+  "$HERE/libcxx_compat.cpp"
   "$SRC/extension.cpp"
   "$SRC/gralloc_handler.cpp"
   "$SRC/hwcomposer.cpp"
@@ -86,13 +110,13 @@ CSRCS=(
 OBJS=()
 for s in "${SRCS[@]}"; do
   o=$OUT/$(basename "${s%.cpp}").o
-  echo "CXX $(basename $s)"
+  echo "CXX $(basename "$s")"
   $CXX "${CXXFLAGS[@]}" "${DEFS[@]}" "${INC[@]}" -c "$s" -o "$o"
   OBJS+=("$o")
 done
 for s in "${CSRCS[@]}"; do
   o=$OUT/$(basename "${s%.c}").o
-  echo "CC  $(basename $s)"
+  echo "CC  $(basename "$s")"
   $CC -O2 -fPIC "${INC[@]}" -c "$s" -o "$o"
   OBJS+=("$o")
 done
@@ -116,5 +140,7 @@ $CXX -shared -o "$OUT/hwcomposer.waydroid.so" "${OBJS[@]}" \
   -l:vendor.waydroid.window@1.1.so \
   -l:vendor.waydroid.window@1.2.so \
   -Wl,--no-undefined -Wl,-soname,hwcomposer.waydroid.so
-echo OK
-ls -l "$OUT/hwcomposer.waydroid.so"
+
+echo "STRIP hwcomposer.waydroid.stripped.so"
+$STRIP -o "$OUT/hwcomposer.waydroid.stripped.so" "$OUT/hwcomposer.waydroid.so"
+ls -l "$OUT/hwcomposer.waydroid.so" "$OUT/hwcomposer.waydroid.stripped.so"

@@ -1,13 +1,52 @@
-# AUR packaging (planned)
+# AUR packaging
 
-The endgame (Roadmap **M8.6**) is a reproducible AUR package that:
+The endgame (Roadmap **M8.6**) is a reproducible AUR package. This directory
+holds the build recipe that gets there, plus a validator that continuously
+proves the stranger's build path.
 
-1. Clones each upstream at the pinned commit in `patches/<component>/BASE`.
-2. Applies the patch series + drops in `src/` net-new files.
-3. Cross-builds the guest bits (NDK) and host renderer, and folds everything
-   into a proper Waydroid image — retiring the per-file `nv/` bind-mounts.
+## One recipe, two front-ends
 
-Prerequisite before packaging: the guest-framework rebuild (native 500 Hz,
-LineageOS 20 image) so there are no more runtime bind-mount hacks to package.
+The build is **not** duplicated between "dev" and "AUR". There is one source of
+truth (`patches/` + `src/`) and one build recipe per component
+(`build/<comp>/build.sh`), consumed by two thin front-ends:
 
-`PKGBUILD` goes here once M8.6 lands.
+```
+build/<comp>/build.sh  SRCDIR [BUILDDIR]      ← the ONE recipe
+      ├── dev/build <comp>        persistent tree, incremental (fast iteration)
+      └── packaging/aur/reproduce.sh   fresh checkout at BASE, clean-room (reproducible)
+                                       └── eventual PKGBUILD build() calls the same
+```
+
+Forcing dev to run the full clone→apply→build per edit would kill iteration
+speed; shipping dev's persistent-tree assumptions would break reproducibility.
+Sharing the *recipe* (not the *pipeline*) gets both.
+
+## Validate the stranger's path
+
+```sh
+packaging/aur/reproduce.sh            # all components
+packaging/aur/reproduce.sh mesa       # one
+SRC_MODE=clone packaging/aur/reproduce.sh mesa   # true from-scratch (re-downloads upstream)
+```
+
+For each component it makes a fresh checkout at `patches/<comp>/BASE`, applies
+the patch series + net-new `src/`, and builds via `build/<comp>/build.sh`.
+
+**Validated (2026-07-12):** mesa (full cross-compile) ✅, virglrenderer (full
+build) ✅, gralloc (NDK compile) ✅, waydroid (patch apply) ✅. hwcomposer
+compiles but its final link needs hand-provisioned prereqs + a mounted image
+rootfs — see [`PREREQS.md`](PREREQS.md), the honest gap list.
+
+## What a stranger can and can't do today
+
+- **Can:** clone this repo, run `reproduce.sh mesa virgl` on a box with the NDK
+  + meson toolchain and get working guest/host binaries — patches apply on the
+  pinned BASE and produce byte-identical trees to what we run.
+- **Can't yet:** `makepkg` a finished package. Two reasons: (1) hwcomposer's
+  prereqs aren't scripted (`PREREQS.md`), and (2) the current stack rides on
+  runtime bind-mounts over a stock image — a real installable package needs the
+  **M8.6** framework rebuild that folds everything into one image and retires
+  the bind-mounts.
+
+`PKGBUILD` lands here once M8.6 does; its `build()` will call the same
+`build/<comp>/build.sh` this validator already exercises.
