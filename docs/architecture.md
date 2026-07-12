@@ -45,8 +45,14 @@ Android app ── Vulkan ──▶ guest Mesa Venus (bionic, vulkan.virtio.so)
 All end up on NVIDIA via Venus:
 
 - HWUI: `debug.hwui.renderer=skiavk` (Skia Vulkan).
-- SurfaceFlinger RenderEngine: `skiagl` on **ANGLE** (`ro.hardware.egl=angle`) —
-  GL-on-Vulkan-on-Venus (unthreaded).
+- SurfaceFlinger RenderEngine: `skiaglthreaded` on **ANGLE**
+  (`ro.hardware.egl=angle`) — GL-on-Vulkan-on-Venus, composition on a
+  dedicated RenderEngine thread (the old prebuilt-ANGLE crash that forced
+  unthreaded `skiagl` is gone on the source ANGLE build). In steady state
+  SF composites nothing: `persist.waydroid.use_subsurface=true` puts hwc
+  in compositing mode — layers are marked DEVICE and their dmabufs attach
+  directly to wayland (sub)surfaces, so a fullscreen game's buffer goes
+  straight to KWin with no SF GLES pass in between.
 - GL apps: ANGLE.
 - `ro.hardware.vulkan=virtio` selects Venus; `mesa.vn.debug=vtest` +
   `mesa.vtest.socket.name=/dev/venus.sock` select the socket transport.
