@@ -1,0 +1,30 @@
+# Developer-only, not published (see README)
+STATE.md
+CLAUDE.md
+docs/dev-workflow.md
+
+# Build outputs
+build/hwcomposer/out/
+build/**/out/
+*.o
+*.so
+*.a
+*.pyc
+__pycache__/
+
+# Compiled test binaries (sources only are tracked)
+tests/*-android
+tests/eglimport
+tests/eglmods
+tests/nvalloc
+tests/nvexport
+tests/nvmembench
+tests/nvmmap
+tests/nvmods
+tests/vnprobe
+
+# Editor / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store

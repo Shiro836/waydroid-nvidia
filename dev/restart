@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+# Full clean restart of waydroid from source: stop everything, rotate log,
+# start container (root, bg) + session (user, bg). The core iteration step:
+#   edit code/props -> dev/restart -> dev/logs
+set -e
+cd "$(dirname "$(readlink -f "$0")")/.."
+LOG=/var/lib/waydroid/waydroid.log
+
+# sudo -n only: bare sudo without a tty burns PAM attempts and faillock
+# locks the account after 3. If creds aren't cached, tell the user instead.
+sudo -n true 2>/dev/null || { echo "no cached sudo — run 'sudo -v' first"; exit 1; }
+
+echo "== stopping =="
+systemctl --user stop wd-session.service 2>/dev/null || true
+python3 waydroid.py session stop 2>/dev/null || true
+sudo -n systemctl stop wd-container.service 2>/dev/null || true
+sleep 1
+
+echo "== rotating log =="
+sudo -n sh -c "[ -f $LOG ] && mv -f $LOG $LOG.1; :"
+
+echo "== starting container (transient systemd unit) =="
+sudo -n systemd-run --unit=wd-container --collect \
+    --working-directory="$PWD" python3 waydroid.py container start
+sleep 2
+
+echo "== starting session (transient user unit, keeps Wayland env) =="
+systemd-run --user --unit=wd-session --collect \
+    --working-directory="$PWD" \
+    --setenv=WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-0}" \
+    --setenv=XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" \
+    python3 waydroid.py session start
+sleep 1
+
+echo "== waiting for boot (max 120s) =="
+for i in $(seq 1 60); do
+    booted=$(python3 waydroid.py prop get sys.boot_completed 2>/dev/null | tr -d '\r')
+    [ "$booted" = 1 ] && { echo "BOOTED after ~$((i*2))s"; break; }
+    sleep 2
+done
+python3 waydroid.py status || true

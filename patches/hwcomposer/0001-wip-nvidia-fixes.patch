@@ -1,0 +1,166 @@
+diff --git a/hwcomposer/gralloc_handler.cpp b/hwcomposer/gralloc_handler.cpp
+index a86b9aa..0f9dae7 100644
+--- a/hwcomposer/gralloc_handler.cpp
++++ b/hwcomposer/gralloc_handler.cpp
+@@ -264,6 +264,11 @@ std::unique_ptr<buffer> create_buffer_gbm(display *display, const buffer_metadat
+ }
+ std::unique_ptr<buffer> create_buffer_cros(display *display, const buffer_metadata& metadata, buffer_handle_t handle) {
+     auto *cros_handle = reinterpret_cast<const cros_gralloc_handle *>(handle);
++    ALOGI("attach dmabuf: %ux%u fmt 0x%x stride %u mod 0x%llx usage 0x%x",
++          metadata.width, metadata.height, cros_handle->format,
++          cros_handle->strides[0],
++          (unsigned long long)cros_handle->format_modifier,
++          cros_handle->usage);
+     return create_dmabuf_wl_buffer(display, metadata, cros_handle->fds[0], cros_handle->format, cros_handle->strides[0], cros_handle->offsets[0], cros_handle->format_modifier, handle);
+ }
+ std::unique_ptr<buffer> create_buffer_android(display *display, const buffer_metadata& metadata, buffer_handle_t handle) {
+@@ -314,6 +319,8 @@ gralloc_handler::get_buffer_metadata_func gralloc_handler::select_get_buffer_met
+ }
+ 
+ gralloc_handler::create_buffer_func gralloc_handler::select_create_buffer_impl(display *display, GrallocType gralloc_type) {
++    ALOGI("create_buffer impl: gtype %d dmabuf %p wlegl %p",
++          (int)gralloc_type, display->dmabuf, display->android_wlegl);
+     if (gralloc_type == GrallocType::GRALLOC_GBM && display->dmabuf) {
+         return create_buffer_gbm;
+     } else if (gralloc_type == GrallocType::GRALLOC_CROS && display->dmabuf) {
+diff --git a/hwcomposer/hwcomposer.cpp b/hwcomposer/hwcomposer.cpp
+index f509ed7..a83fd2f 100644
+--- a/hwcomposer/hwcomposer.cpp
++++ b/hwcomposer/hwcomposer.cpp
+@@ -446,6 +446,14 @@ static int hwc_set(struct hwc_composer_device_1* dev,size_t numDisplays,
+     }
+ 
+     auto& mode = pdev->selected_mode;
++    static int set_count = 0;
++    if ((set_count++ % 2000) == 0) {
++        char aa[PROPERTY_VALUE_MAX];
++        property_get("waydroid.active_apps", aa, "none");
++        ALOGI("hwc_set #%d: active_apps=%s layers=%zu windows=%zu compose=%d",
++              set_count - 1, aa, contents->numHwLayers,
++              pdev->display->windows.size(), (int)pdev->should_compose);
++    }
+     mode->setup_set(pdev, contents);
+ 
+     std::scoped_lock lock(pdev->display->windowsMutex);
+@@ -792,6 +800,20 @@ static int hwc_open(const struct hw_module_t* module, const char* name,
+     if (pdev->display->refresh > 1000 && pdev->display->refresh < 1000000)
+         pdev->vsync_period_ns = 1000 * 1000 * 1000 / (pdev->display->refresh / 1000);
+ 
++    /* Manual override: persist.waydroid.refresh_rate=<Hz> forces the vsync
++     * period reported to SurfaceFlinger regardless of what the wl_outputs
++     * advertise. Useful on very-high-refresh monitors where the guest
++     * framework can't keep the frame budget (e.g. force 250 on a 500 Hz
++     * panel). 0/unset keeps the wl_output-derived rate.
++     */
++    {
++        int32_t forced_hz = property_get_int32("persist.waydroid.refresh_rate", 0);
++        if (forced_hz > 0 && forced_hz <= 1000) {
++            pdev->vsync_period_ns = 1000 * 1000 * 1000 / forced_hz;
++            ALOGI("refresh override: %d Hz (persist.waydroid.refresh_rate)", forced_hz);
++        }
++    }
++
+     struct timespec rt;
+     if (clock_gettime(CLOCK_MONOTONIC, &rt) == -1) {
+        ALOGE("%s:%d error in vsync thread clock_gettime: %s",
+diff --git a/hwcomposer/modes/full-ui.cpp b/hwcomposer/modes/full-ui.cpp
+index 351d780..52d27c6 100644
+--- a/hwcomposer/modes/full-ui.cpp
++++ b/hwcomposer/modes/full-ui.cpp
+@@ -39,6 +39,7 @@ window *full_ui_mode_base::get_window(waydroid_hwc_composer_device_1 *pdev) {
+         assert(it != windows.end() && it->first == "Waydroid");
+         return it->second.get();
+     } else {
++        ALOGI("full-ui: creating Waydroid window");
+         return windows.add(pdev, "Waydroid", "Waydroid", "0");
+     }
+ }
+diff --git a/hwcomposer/modes/single-window.cpp b/hwcomposer/modes/single-window.cpp
+index 14ffccb..f3027a6 100644
+--- a/hwcomposer/modes/single-window.cpp
++++ b/hwcomposer/modes/single-window.cpp
+@@ -51,16 +51,51 @@ int single_window_mode_base::setup_set(waydroid_hwc_composer_device_1* pdev, hwc
+ 
+ int single_window_mode_base::cleanup_stale_windows(waydroid_hwc_composer_device_1* pdev,
+                                                    hwc_display_contents_1_t*) {
+-    auto first_tid_layer = std::find_if(layer_infos.container().cbegin(), layer_infos.container().cend(), [&](const auto& layer_info){
+-        return layer_info.type == LayerSplitType::TID;
+-    });
+-    if (first_tid_layer != layer_infos.container().cend()) {
+-        if (is_blacklisted(pdev, first_tid_layer->aid, first_tid_layer->component)) {
+-            clear_open_windows(pdev);
+-            return 0;
+-        } else if (pdev->display->ignored_apps.count(first_tid_layer->tid) == 0) {
++    /* Pick the first TID layer that is not blacklisted. The launcher layer
++     * (blacklisted by default) legitimately sits below non-fullscreen app
++     * windows in SF's bottom-to-top layer list; treating "first TID layer is
++     * blacklisted" as "close everything" made any portrait/windowed app
++     * (e.g. games with pillarboxing) show NO window at all. Only close the
++     * windows when every TID layer on screen is blacklisted.
++     */
++    auto tid_layers_end = layer_infos.container().cend();
++    auto first_tid_layer = tid_layers_end;
++    bool saw_tid_layer = false;
++    for (auto it2 = layer_infos.container().cbegin(); it2 != tid_layers_end; ++it2) {
++        if (it2->type != LayerSplitType::TID)
++            continue;
++        saw_tid_layer = true;
++        if (!is_blacklisted(pdev, it2->aid, it2->component)) {
++            first_tid_layer = it2;
++            break;
++        }
++    }
++    if (first_tid_layer != tid_layers_end) {
++        if (pdev->display->ignored_apps.count(first_tid_layer->tid) == 0) {
+             target_layer_tid = first_tid_layer->tid;
+             target_layer_aid = first_tid_layer->aid;
++        } else {
++            static int ign_count = 0;
++            if ((ign_count++ % 500) == 0)
++                ALOGI("single-window: tid %s (%s) in ignored_apps -> no window",
++                      first_tid_layer->tid.c_str(), first_tid_layer->aid.c_str());
++        }
++        static int tgt_count = 0;
++        if ((tgt_count++ % 2000) == 0)
++            ALOGI("single-window: target tid='%s' aid='%s' should_show=%d",
++                  target_layer_tid.c_str(), target_layer_aid.c_str(),
++                  (int)should_show());
++    } else if (saw_tid_layer) {
++        ALOGI("single-window: all TID layers blacklisted -> no window");
++        clear_open_windows(pdev);
++        return 0;
++    } else {
++        static int no_tid_count = 0;
++        if ((no_tid_count++ % 500) == 0) {
++            ALOGI("single-window: NO TID layer among %zu layers (window stays closed)",
++                  layer_infos.container().size());
++            for (size_t i = 0; i < pdev->display->layer_names.size() && i < 8; i++)
++                ALOGI("  layer_name[%zu] = '%s'", i, pdev->display->layer_names[i].c_str());
+         }
+     }
+ 
+diff --git a/hwcomposer/modes/waydroid_mode_impl.h b/hwcomposer/modes/waydroid_mode_impl.h
+index 000b388..9fc59ae 100644
+--- a/hwcomposer/modes/waydroid_mode_impl.h
++++ b/hwcomposer/modes/waydroid_mode_impl.h
+@@ -136,9 +136,20 @@ class non_compositing_window_mode : public virtual waydroid_mode {
+     }
+ 
+     int setup_set(waydroid_hwc_composer_device_1 *, hwc_display_contents_1_t *contents) override {
++        static int dbg_count = 0;
++        bool dbg = (dbg_count++ % 2000) == 0;
+         for (size_t i = 0; i < contents->numHwLayers; ++i) {
+             auto& layer = contents->hwLayers[i];
++            if (dbg)
++                ALOGI("noncomp setup_set: layer[%zu] type=%d handle=%p flags=0x%x",
++                      i, layer.compositionType, layer.handle, layer.flags);
++            /* hwc_set only forwards layers with a buffer to handle_layer, so
++             * the framebuffer must be drawn at an index that will actually be
++             * visited: the first FRAMEBUFFER-ish layer that has a handle
++             * (bufferless dim/effect layers otherwise swallow the draw and
++             * the window never gets a buffer nor gets created). */
+             if (m_draw_framebuffer_at == UNSET_VALUE
++                && layer.handle
+                 && (layer.compositionType == HWC_FRAMEBUFFER || layer.compositionType == HWC_FRAMEBUFFER_TARGET)) {
+                 m_draw_framebuffer_at = i;
+             }

@@ -1,0 +1,35 @@
+diff --git a/tools/helpers/lxc.py b/tools/helpers/lxc.py
+index d3f6c24..d5d0510 100644
+--- a/tools/helpers/lxc.py
++++ b/tools/helpers/lxc.py
+@@ -124,6 +124,17 @@ def generate_nodes_lxc_config(args):
+     # NFC config
+     make_entry("/system/etc/libnfc-nci.conf", options="bind,optional 0 0")
+ 
++    # NVIDIA Venus stack (see nvidia_port_state.md): host venus socket dir and
++    # our replacement guest libraries, bind-mounted over the image. Kept here
++    # so config_nodes regeneration (init/upgrade) does not lose them.
++    nodes.append("lxc.mount.entry = /run/waydroid-venus dev/venus none rbind,create=dir,optional 0 0")
++    nodes.append("lxc.mount.entry = /var/lib/waydroid/overlay/vendor/lib64/hw/vulkan.virtio.so vendor/lib64/hw/vulkan.virtio.so none rbind,create=file,optional 0 0")
++    nodes.append("lxc.mount.entry = /var/lib/waydroid/nv/libgbm_mesa_wrapper.so vendor/lib64/libgbm_mesa_wrapper.so none rbind,create=file,optional 0 0")
++    nodes.append("lxc.mount.entry = /var/lib/waydroid/nv/hwcomposer.waydroid.so vendor/lib64/hw/hwcomposer.waydroid.so none rbind,create=file,optional 0 0")
++    nodes.append("lxc.mount.entry = /var/lib/waydroid/nv/libEGL_angle.so vendor/lib64/egl/libEGL_angle.so none rbind,create=file,optional 0 0")
++    nodes.append("lxc.mount.entry = /var/lib/waydroid/nv/libGLESv1_CM_angle.so vendor/lib64/egl/libGLESv1_CM_angle.so none rbind,create=file,optional 0 0")
++    nodes.append("lxc.mount.entry = /var/lib/waydroid/nv/libGLESv2_angle.so vendor/lib64/egl/libGLESv2_angle.so none rbind,create=file,optional 0 0")
++
+     return nodes
+ 
+ LXC_APPARMOR_PROFILE = "lxc-waydroid"
+diff --git a/tools/services/hardware_manager.py b/tools/services/hardware_manager.py
+index 072df41..7f74391 100644
+--- a/tools/services/hardware_manager.py
++++ b/tools/services/hardware_manager.py
+@@ -23,6 +23,8 @@ def start(args):
+         cfg = tools.config.load(args)
+         if cfg["waydroid"]["suspend_action"] == "stop":
+             tools.actions.session_manager.stop(args)
++        elif cfg["waydroid"]["suspend_action"] == "none":
++            logging.debug("Ignoring suspend request (suspend_action = none)")
+         else:
+             tools.actions.container_manager.freeze(args)
+ 

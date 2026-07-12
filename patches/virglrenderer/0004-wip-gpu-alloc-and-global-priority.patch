@@ -1,0 +1,249 @@
+diff --git a/src/venus/vkr_device.c b/src/venus/vkr_device.c
+index 3e943bf..3880c3e 100644
+--- a/src/venus/vkr_device.c
++++ b/src/venus/vkr_device.c
+@@ -108,6 +108,8 @@ vkr_dispatch_vkCreateDevice(struct vn_dispatch_context *dispatch,
+          const uint32_t queue_count = args->pCreateInfo->pQueueCreateInfos[i].queueCount;
+ 
+          if (queue_family_index >= physical_dev->queue_family_property_count) {
++            vkr_log("CreateDevice: bad queueFamilyIndex %u (families %u)",
++                    queue_family_index, physical_dev->queue_family_property_count);
+             args->ret = VK_ERROR_UNKNOWN;
+             break;
+          }
+@@ -117,6 +119,9 @@ vkr_dispatch_vkCreateDevice(struct vn_dispatch_context *dispatch,
+ 
+          if (queue_family_properties->queueCount - counts[queue_family_index] <
+              queue_count) {
++            vkr_log("CreateDevice: family %u queueCount %u exceeds available %u",
++                    queue_family_index, queue_count,
++                    queue_family_properties->queueCount - counts[queue_family_index]);
+             args->ret = VK_ERROR_UNKNOWN;
+             break;
+          }
+@@ -176,7 +181,38 @@ vkr_dispatch_vkCreateDevice(struct vn_dispatch_context *dispatch,
+    vn_replace_vkCreateDevice_args_handle(args);
+    args->ret = vk->CreateDevice(args->physicalDevice, args->pCreateInfo, NULL,
+                                 &dev->base.handle.device);
++
++   /* Android clients (HWUI) request a global queue priority and expect it to
++    * be honored best-effort, but desktop drivers (NVIDIA) reject unprivileged
++    * priority requests with NOT_PERMITTED. Retry without the priority chain.
++    */
++   if (args->ret == VK_ERROR_NOT_PERMITTED_KHR) {
++      bool stripped = false;
++      for (uint32_t i = 0; i < args->pCreateInfo->queueCreateInfoCount; i++) {
++         VkDeviceQueueCreateInfo *qci =
++            (VkDeviceQueueCreateInfo *)&args->pCreateInfo->pQueueCreateInfos[i];
++         VkBaseOutStructure *prev = (VkBaseOutStructure *)qci;
++         for (VkBaseOutStructure *s = prev->pNext; s; s = s->pNext) {
++            if (s->sType ==
++                VK_STRUCTURE_TYPE_DEVICE_QUEUE_GLOBAL_PRIORITY_CREATE_INFO_KHR) {
++               prev->pNext = s->pNext;
++               stripped = true;
++            } else {
++               prev = s;
++            }
++         }
++      }
++      if (stripped) {
++         vkr_log("CreateDevice: NOT_PERMITTED; retrying without global queue "
++                 "priority");
++         args->ret = vk->CreateDevice(args->physicalDevice, args->pCreateInfo,
++                                      NULL, &dev->base.handle.device);
++      }
++   }
++
+    if (args->ret != VK_SUCCESS) {
++      vkr_log("CreateDevice: host driver returned %d (extCount=%u)", args->ret,
++              args->pCreateInfo->enabledExtensionCount);
+       free(exts);
+       free(dev);
+       return;
+diff --git a/vtest/meson.build b/vtest/meson.build
+index c2bd278..387084f 100644
+--- a/vtest/meson.build
++++ b/vtest/meson.build
+@@ -29,6 +29,8 @@ vtest_sources = [
+    'vtest_shm.h',
+    'vtest_server.c',
+    'vtest_renderer.c',
++   'vtest_gpu_alloc.c',
++   'vtest_gpu_alloc.h',
+    'vtest_protocol.h',
+    'vtest.h'
+ ]
+diff --git a/vtest/vtest.h b/vtest/vtest.h
+index fa74075..178e716 100644
+--- a/vtest/vtest.h
++++ b/vtest/vtest.h
+@@ -96,6 +96,7 @@ int vtest_sync_write(uint32_t length_dw);
+ int vtest_sync_wait(uint32_t length_dw);
+ int vtest_sync_export_sync_file(uint32_t length_dw);
+ int vtest_resource_import_blob(uint32_t length_dw);
++int vtest_resource_alloc_gpu(uint32_t length_dw);
+ 
+ int vtest_submit_cmd2(uint32_t length_dw);
+ 
+diff --git a/vtest/vtest_protocol.h b/vtest/vtest_protocol.h
+index 3a7381f..b8f9f4a 100644
+--- a/vtest/vtest_protocol.h
++++ b/vtest/vtest_protocol.h
+@@ -98,6 +98,8 @@
+ #define VCMD_SYNC_EXPORT_SYNC_FILE 39
+ /* import a dmabuf fd as a blob resource attached to the context */
+ #define VCMD_RESOURCE_IMPORT_BLOB 40
++/* allocate a gralloc buffer on the host render GPU, reply with its dma_buf */
++#define VCMD_RESOURCE_ALLOC_GPU 41
+ 
+ #define VCMD_RES_CREATE_SIZE 10
+ #define VCMD_RES_CREATE_RES_HANDLE 0 /* must be 0 since protocol version 3 */
+@@ -262,6 +264,30 @@ enum vcmd_sync_export_sync_file_status {
+ #define VCMD_RESOURCE_IMPORT_BLOB_SIZE_HI 1
+ /* followed by 1 fd; resp res_id (0 = failure) */
+ 
++/* Allocate a gralloc buffer on the host render GPU (or host shmem for
++ * CPU-mappable buffers) and return its dma_buf.  Used by the guest gralloc
++ * so that window buffers are native to the compositing GPU.  The response is
++ * 7 dwords (status, stride, map_stride, modifier lo/hi, size lo/hi) followed
++ * by 1 fd (SCM_RIGHTS, server -> client) if status == OK.
++ */
++#define VCMD_RESOURCE_ALLOC_GPU_SIZE 4
++#define VCMD_RESOURCE_ALLOC_GPU_WIDTH 0
++#define VCMD_RESOURCE_ALLOC_GPU_HEIGHT 1
++#define VCMD_RESOURCE_ALLOC_GPU_FORMAT 2 /* DRM fourcc */
++#define VCMD_RESOURCE_ALLOC_GPU_FLAGS 3
++
++#define VCMD_ALLOC_GPU_FLAG_MAPPABLE (1u << 0) /* guest needs CPU mmap */
++#define VCMD_ALLOC_GPU_FLAG_SCANOUT (1u << 1)
++
++#define VCMD_RESOURCE_ALLOC_GPU_RESP_SIZE 7
++#define VCMD_RESOURCE_ALLOC_GPU_RESP_STATUS 0 /* 0 = OK */
++#define VCMD_RESOURCE_ALLOC_GPU_RESP_STRIDE 1
++#define VCMD_RESOURCE_ALLOC_GPU_RESP_MAP_STRIDE 2
++#define VCMD_RESOURCE_ALLOC_GPU_RESP_MODIFIER_LO 3
++#define VCMD_RESOURCE_ALLOC_GPU_RESP_MODIFIER_HI 4
++#define VCMD_RESOURCE_ALLOC_GPU_RESP_SIZE_LO 5
++#define VCMD_RESOURCE_ALLOC_GPU_RESP_SIZE_HI 6
++
+ enum vcmd_submit_cmd2_flag {
+    VCMD_SUBMIT_CMD2_FLAG_RING_IDX = 1 << 0,
+    VCMD_SUBMIT_CMD2_FLAG_IN_FENCE_FD = 1 << 1,
+diff --git a/vtest/vtest_renderer.c b/vtest/vtest_renderer.c
+index f3212ad..8e5f6f5 100644
+--- a/vtest/vtest_renderer.c
++++ b/vtest/vtest_renderer.c
+@@ -53,6 +53,7 @@
+ 
+ #include "vtest.h"
+ #include "vtest_shm.h"
++#include "vtest_gpu_alloc.h"
+ #include "vtest_protocol.h"
+ #include "threadpool.h"
+ 
+@@ -2491,6 +2492,64 @@ int vtest_resource_import_blob(uint32_t length_dw)
+    return vtest_block_write(ctx->out_fd, resp_buf, sizeof(resp_buf)) >= 0 ? 0 : -1;
+ }
+ 
++int vtest_resource_alloc_gpu(uint32_t length_dw)
++{
++   struct vtest_context *ctx = vtest_get_current_context();
++   uint32_t req[VCMD_RESOURCE_ALLOC_GPU_SIZE];
++   uint32_t resp_buf[VTEST_HDR_SIZE + VCMD_RESOURCE_ALLOC_GPU_RESP_SIZE];
++   uint32_t *resp = &resp_buf[VTEST_CMD_DATA_START];
++   int fd = -1;
++   int ret;
++
++   if (length_dw != VCMD_RESOURCE_ALLOC_GPU_SIZE)
++      return -EINVAL;
++
++   ret = ctx->input->read(ctx->input, req, sizeof(req));
++   if (ret != sizeof(req))
++      return -1;
++
++   const uint32_t width = req[VCMD_RESOURCE_ALLOC_GPU_WIDTH];
++   const uint32_t height = req[VCMD_RESOURCE_ALLOC_GPU_HEIGHT];
++   const uint32_t drm_format = req[VCMD_RESOURCE_ALLOC_GPU_FORMAT];
++   const uint32_t flags = req[VCMD_RESOURCE_ALLOC_GPU_FLAGS];
++
++   uint32_t stride = 0;
++   uint64_t modifier = 0;
++   uint64_t size = 0;
++
++   if (!width || !height || width > 32768 || height > 32768) {
++      ret = -EINVAL;
++   } else if (flags & VCMD_ALLOC_GPU_FLAG_MAPPABLE) {
++      ret = vtest_gpu_alloc_cpu(width, height, drm_format, &stride, &size, &fd);
++   } else {
++      ret = vtest_gpu_alloc_gpu(width, height, drm_format, &stride, &modifier,
++                                &size, &fd);
++   }
++   if (ret)
++      report_failed_call("vtest_gpu_alloc", ret);
++
++   memset(resp_buf, 0, sizeof(resp_buf));
++   resp_buf[VTEST_CMD_LEN] = VCMD_RESOURCE_ALLOC_GPU_RESP_SIZE;
++   resp_buf[VTEST_CMD_ID] = VCMD_RESOURCE_ALLOC_GPU;
++   resp[VCMD_RESOURCE_ALLOC_GPU_RESP_STATUS] = ret ? (uint32_t)-ret : 0;
++   resp[VCMD_RESOURCE_ALLOC_GPU_RESP_STRIDE] = stride;
++   /* both paths allocate linear, so the CPU view stride == GPU stride */
++   resp[VCMD_RESOURCE_ALLOC_GPU_RESP_MAP_STRIDE] = stride;
++   resp[VCMD_RESOURCE_ALLOC_GPU_RESP_MODIFIER_LO] = (uint32_t)modifier;
++   resp[VCMD_RESOURCE_ALLOC_GPU_RESP_MODIFIER_HI] = (uint32_t)(modifier >> 32);
++   resp[VCMD_RESOURCE_ALLOC_GPU_RESP_SIZE_LO] = (uint32_t)size;
++   resp[VCMD_RESOURCE_ALLOC_GPU_RESP_SIZE_HI] = (uint32_t)(size >> 32);
++
++   ret = vtest_block_write(ctx->out_fd, resp_buf, sizeof(resp_buf));
++   if (ret >= 0 && fd >= 0)
++      ret = vtest_send_fd(ctx->out_fd, fd);
++
++   if (fd >= 0)
++      close(fd);
++
++   return ret >= 0 ? 0 : ret;
++}
++
+ int vtest_sync_export_sync_file(uint32_t length_dw)
+ {
+    struct vtest_context *ctx = vtest_get_current_context();
+diff --git a/vtest/vtest_server.c b/vtest/vtest_server.c
+index dcf1b19..9d867ea 100644
+--- a/vtest/vtest_server.c
++++ b/vtest/vtest_server.c
+@@ -33,6 +33,7 @@
+ #include <stdlib.h>
+ #include <sys/types.h>
+ #include <sys/socket.h>
++#include <sys/stat.h>
+ #include <netinet/in.h>
+ #include <sys/un.h>
+ #include <fcntl.h>
+@@ -426,6 +427,11 @@ static void vtest_server_open_socket(void)
+       goto err;
+    }
+ 
++   /* guest clients run as arbitrary uids inside the container; make the
++    * socket world-connectable here (an external chmod races with the
++    * unlink+bind above) */
++   chmod(un.sun_path, 0777);
++
+    return;
+ 
+ err:
+@@ -732,6 +738,7 @@ static const struct vtest_command {
+    HANDLER(RESOURCE_EXPORT_FD,          resource_export_fd,        true   ),
+    HANDLER(SYNC_EXPORT_SYNC_FILE,       sync_export_sync_file,     true   ),
+    HANDLER(RESOURCE_IMPORT_BLOB,        resource_import_blob,      true   ),
++   HANDLER(RESOURCE_ALLOC_GPU,          resource_alloc_gpu,        false  ),
+ };
+ 
+ static int vtest_client_dispatch_commands(struct vtest_client *client)
+@@ -766,6 +773,8 @@ static int vtest_client_dispatch_commands(struct vtest_client *client)
+ 
+    vtest_poll_resource_busy_wait();
+    if (header[1] <= 0 || header[1] >= ARRAY_SIZE(vtest_commands)) {
++      fprintf(stderr, "bad command id %u (len %u, table size %zu)\n",
++              header[1], header[0], (size_t)ARRAY_SIZE(vtest_commands));
+       return VTEST_CLIENT_ERROR_COMMAND_ID;
+    }
+ 

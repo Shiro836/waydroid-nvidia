@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# Run waydroid FROM THIS SOURCE CHECKOUT as the user (session/UI cmds — needs Wayland env).
+# Usage: dev/wdu session start | dev/wdu show-full-ui | dev/wdu status
+set -e
+cd "$(dirname "$(readlink -f "$0")")/.."
+exec python3 waydroid.py "$@"

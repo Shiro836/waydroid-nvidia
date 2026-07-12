@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# One-screen truth: what's running, which GPU path is active, host GPU load.
+set -e
+cd "$(dirname "$(readlink -f "$0")")/.."
+echo "===== waydroid status ====="
+python3 waydroid.py status 2>/dev/null || echo "(session down)"
+echo; echo "===== effective GPU props (waydroid_base.prop) ====="
+grep -E 'gralloc|egl|vulkan' /var/lib/waydroid/waydroid_base.prop 2>/dev/null
+echo; echo "===== in-container reality ====="
+# sudo -n only: a bare sudo without a tty burns PAM attempts (empty password)
+# and faillock locks the account after 3 — never prompt from this script.
+if sudo -n true 2>/dev/null; then
+    for p in ro.hardware.gralloc ro.hardware.egl ro.hardware.vulkan gralloc.gbm.device sys.boot_completed; do
+        v=$(sudo -n python3 waydroid.py shell -- getprop $p 2>/dev/null | tr -d '\r')
+        printf '%-28s %s\n' "$p" "${v:-<container down>}"
+    done
+    echo; echo "===== renderer actually used (SurfaceFlinger) ====="
+    sudo -n python3 waydroid.py shell -- dumpsys SurfaceFlinger 2>/dev/null | grep -iE 'GLES:|renderer|vulkan' | head -5 || true
+else
+    echo "(no cached sudo — run 'sudo -v' first for in-container checks)"
+fi
+echo; echo "===== host GPUs ====="
+for d in /sys/class/drm/renderD*/device/uevent; do echo "$d: $(grep DRIVER $d)"; done
+nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader 2>/dev/null | sed 's/^/5090: /' || true

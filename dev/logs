@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# Aggregate the logs that matter for GPU bring-up.
+#   dev/logs          -> one-shot dump (last 60 waydroid.log lines + gfx-filtered logcat)
+#   dev/logs -f       -> follow waydroid.log live
+#   dev/logs gfx      -> logcat filtered to graphics init (gralloc/EGL/vulkan/SF)
+#   dev/logs all      -> full logcat dump
+set -e
+cd "$(dirname "$(readlink -f "$0")")/.."
+LOG=/var/lib/waydroid/waydroid.log
+GFX_RE='gralloc|Gralloc|EGL|egl|[Vv]ulkan|SurfaceFlinger|hwcomposer|hwc|libEGL|swiftshader|mesa|drm|minigbm'
+
+case "${1:-dump}" in
+  -f)   exec sudo tail -f "$LOG" ;;
+  gfx)  exec sudo python3 waydroid.py logcat -- -d | grep -E "$GFX_RE" ;;
+  all)  exec sudo python3 waydroid.py logcat -- -d ;;
+  units)
+    echo "===== wd-container unit ====="; sudo journalctl -u wd-container -n 40 --no-pager
+    echo "===== wd-session unit ====="; journalctl --user -u wd-session -n 40 --no-pager
+    ;;
+  dump)
+    echo "===== waydroid.log (tail) ====="
+    sudo tail -60 "$LOG" 2>/dev/null || echo "(no log)"
+    echo; echo "===== logcat: graphics init ====="
+    sudo python3 waydroid.py logcat -- -d 2>/dev/null | grep -E "$GFX_RE" | tail -80 || echo "(logcat unavailable — container down?)"
+    ;;
+esac

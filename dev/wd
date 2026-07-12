@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# Run waydroid FROM THIS SOURCE CHECKOUT as root (container/init/upgrade cmds).
+# Usage: dev/wd container start | dev/wd upgrade -o | dev/wd shell ...
+set -e
+cd "$(dirname "$(readlink -f "$0")")/.."
+exec sudo python3 waydroid.py "$@"
