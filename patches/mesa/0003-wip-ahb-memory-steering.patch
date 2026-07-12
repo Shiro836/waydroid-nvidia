@@ -1,8 +1,8 @@
 diff --git a/src/virtio/vtest/vtest_protocol.h b/src/virtio/vtest/vtest_protocol.h
-index c8a1bbf..c7c1dba 100644
+index c8a1bbf..c622c5b 100644
 --- a/src/virtio/vtest/vtest_protocol.h
 +++ b/src/virtio/vtest/vtest_protocol.h
-@@ -98,6 +98,15 @@
+@@ -98,6 +98,22 @@
  #define VCMD_SYNC_EXPORT_SYNC_FILE 39
  /* import a dmabuf fd as a blob resource attached to the context */
  #define VCMD_RESOURCE_IMPORT_BLOB 40
@@ -15,15 +15,24 @@ index c8a1bbf..c7c1dba 100644
 + * payload = {point_lo, point_hi} followed by a regular submit_cmd2 payload
 + */
 +#define VCMD_SUBMIT_CMD2_TIMELINE 43
++/* import a sync_file fd (via SCM_RIGHTS) as the temporary payload of a venus
++ * semaphore, so the host GPU waits it instead of the guest CPU:
++ * payload = {device_id_lo, device_id_hi, semaphore_id_lo, semaphore_id_hi};
++ * reply = {status} — the roundtrip orders the import before any subsequent
++ * ring submission that waits on the semaphore
++ */
++#define VCMD_SEMAPHORE_IMPORT_SYNC_FD 44
  
  #define VCMD_RES_CREATE_SIZE 10
  #define VCMD_RES_CREATE_RES_HANDLE 0 /* must be 0 since protocol version 3 */
-@@ -170,6 +179,8 @@ enum vcmd_param  {
+@@ -170,6 +186,10 @@ enum vcmd_param  {
     VCMD_PARAM_HAS_TIMELINE_SYNCOBJ = 2,
     /* server supports VCMD_SYNC_EXPORT_SYNC_FILE for venus sync points */
     VCMD_PARAM_HAS_VENUS_SYNC_FD = 3,
 +   /* server supports VCMD_TIMELINE_GET + VCMD_SUBMIT_CMD2_TIMELINE */
 +   VCMD_PARAM_HAS_TIMELINE_FENCE = 4,
++   /* server supports VCMD_SEMAPHORE_IMPORT_SYNC_FD */
++   VCMD_PARAM_HAS_SEMAPHORE_IMPORT = 5,
  };
  #define VCMD_GET_PARAM_SIZE 1
  #define VCMD_GET_PARAM_PARAM 0
@@ -449,10 +458,54 @@ index 7ee58ac..19d8461 100644
  }
  
 diff --git a/src/virtio/vulkan/vn_queue.c b/src/virtio/vulkan/vn_queue.c
-index 4c337a3..9083326 100644
+index 4c337a3..3957600 100644
 --- a/src/virtio/vulkan/vn_queue.c
 +++ b/src/virtio/vulkan/vn_queue.c
-@@ -1853,6 +1853,7 @@ vn_create_sync_file(struct vn_device *dev,
+@@ -383,6 +383,9 @@ vn_fix_device_group_cmd_count(struct vn_queue_submission *submit,
+ static bool
+ vn_semaphore_wait_external(struct vn_device *dev, struct vn_semaphore *sem);
+ 
++static void
++vn_sync_payload_release(struct vn_device *dev, struct vn_sync_payload *payload);
++
+ static VkResult
+ vn_queue_submission_fix_batch_semaphores(struct vn_queue_submission *submit,
+                                          uint32_t batch_index)
+@@ -401,6 +404,33 @@ vn_queue_submission_fix_batch_semaphores(struct vn_queue_submission *submit,
+       if (payload->type != VN_SYNC_TYPE_IMPORTED_SYNC_FD)
+          continue;
+ 
++      /* Hand the sync_file to the renderer as the HOST semaphore's temporary
++       * payload so the queue submission waits it on the GPU.  The old path
++       * below CPU-blocks in sync_wait until the fd signals before even
++       * submitting — one full frame of added latency per acquire fence
++       * (measured ~3 ms per SurfaceFlinger composite).
++       */
++      struct vn_renderer *renderer = dev->instance->renderer;
++      if (renderer->info.has_semaphore_import && payload->fd >= 0) {
++         /* the import travels over the socket while queue commands travel
++          * over the ring: drain the ring first so an earlier submission
++          * waiting this semaphore cannot consume the new payload
++          */
++         vn_ring_roundtrip(dev->primary_ring);
++         if (renderer->ops.semaphore_import_sync_fd(
++                renderer, dev->base.id, sem->base.id, payload->fd) ==
++             VK_SUCCESS) {
++            /* host owns the wait now; drop our copy and reset the guest-side
++             * payload model (temporary import is consumed by the wait)
++             */
++            vn_sync_payload_release(dev, &sem->temporary);
++            sem->payload = &sem->permanent;
++            continue;
++         }
++         vn_log(dev->instance,
++                "semaphore sync_fd import failed, using CPU wait");
++      }
++
+       if (!vn_semaphore_wait_external(dev, sem))
+          return VK_ERROR_DEVICE_LOST;
+ 
+@@ -1853,6 +1883,7 @@ vn_create_sync_file(struct vn_device *dev,
        .sync_values = &(const uint64_t){ 1 },
        .sync_count = 1,
        .ring_idx = external_payload->ring_idx,
@@ -461,10 +514,22 @@ index 4c337a3..9083326 100644
  
     uint32_t local_data[8];
 diff --git a/src/virtio/vulkan/vn_renderer.h b/src/virtio/vulkan/vn_renderer.h
-index fc5ff2c..1d8f456 100644
+index fc5ff2c..d5c1150 100644
 --- a/src/virtio/vulkan/vn_renderer.h
 +++ b/src/virtio/vulkan/vn_renderer.h
-@@ -103,6 +103,15 @@ struct vn_renderer_submit_batch {
+@@ -66,6 +66,11 @@ struct vn_renderer_info {
+ 
+    bool has_dma_buf_import;
+    bool has_external_sync;
++   /* renderer can adopt a sync_file fd as a host semaphore's temporary
++    * payload (VCMD_SEMAPHORE_IMPORT_SYNC_FD over vtest), so queue
++    * submissions wait it on the GPU instead of a guest-CPU sync_wait
++    */
++   bool has_semaphore_import;
+    bool has_timeline_sync;
+    bool has_implicit_fencing;
+    bool has_guest_vram;
+@@ -103,6 +108,15 @@ struct vn_renderer_submit_batch {
     /* TODO allow NULL when syncs are all binary? */
     const uint64_t *sync_values;
     uint32_t sync_count;
@@ -480,8 +545,25 @@ index fc5ff2c..1d8f456 100644
  };
  
  struct vn_renderer_wait {
+@@ -128,6 +142,16 @@ struct vn_renderer_ops {
+     */
+    VkResult (*wait)(struct vn_renderer *renderer,
+                     const struct vn_renderer_wait *wait);
++
++   /* import sync_file_fd as the temporary payload of the host semaphore
++    * identified by venus object ids; the fd is NOT consumed.  Synchronous:
++    * on return the import is ordered before later ring submissions.
++    * Optional (see info.has_semaphore_import).
++    */
++   VkResult (*semaphore_import_sync_fd)(struct vn_renderer *renderer,
++                                        uint64_t device_id,
++                                        uint64_t semaphore_id,
++                                        int sync_file_fd);
+ };
+ 
+ struct vn_renderer_shmem_ops {
 diff --git a/src/virtio/vulkan/vn_renderer_vtest.c b/src/virtio/vulkan/vn_renderer_vtest.c
-index 7aaebd2..6212e83 100644
+index 7aaebd2..bfc7184 100644
 --- a/src/virtio/vulkan/vn_renderer_vtest.c
 +++ b/src/virtio/vulkan/vn_renderer_vtest.c
 @@ -10,12 +10,15 @@
@@ -512,10 +594,12 @@ index 7aaebd2..6212e83 100644
  };
  
  struct vtest {
-@@ -58,6 +66,18 @@ struct vtest {
+@@ -57,6 +65,19 @@ struct vtest {
+    uint32_t protocol_version;
     uint32_t max_timeline_count;
     bool has_venus_sync_fd;
- 
++   bool has_semaphore_import;
++
 +   /* Shared DRM timeline syncobj (see docs/fence-timeline-design.md in the
 +    * waydroid-nvidia repo): the server materializes each pointed submit's
 +    * fence at its timeline point; sync_file export becomes local syncobj
@@ -527,11 +611,10 @@ index 7aaebd2..6212e83 100644
 +      uint32_t handle;     /* timeline syncobj handle on node_fd */
 +      uint64_t next_point; /* guarded by sock_mutex */
 +   } timeline;
-+
+ 
     struct {
        uint32_t id;
-       uint32_t version;
-@@ -532,6 +552,39 @@ vtest_vcmd_resource_import_blob(struct vtest *vtest, uint64_t size, int fd)
+@@ -532,6 +553,39 @@ vtest_vcmd_resource_import_blob(struct vtest *vtest, uint64_t size, int fd)
     return res_id;
  }
  
@@ -571,7 +654,7 @@ index 7aaebd2..6212e83 100644
  static int
  vtest_vcmd_sync_export_sync_file(struct vtest *vtest,
                                   uint32_t sync_id,
-@@ -581,11 +634,31 @@ vtest_vcmd_submit_cmd2(struct vtest *vtest,
+@@ -581,11 +635,31 @@ vtest_vcmd_submit_cmd2(struct vtest *vtest,
     if (!total_size)
        return;
  
@@ -605,7 +688,7 @@ index 7aaebd2..6212e83 100644
     /* write batch count and batch headers */
     const uint32_t batch_count = 1;
     size_t sync_offset = header_size + batch->cs_size;
-@@ -658,6 +731,59 @@ vtest_sync_reset(struct vn_renderer *renderer,
+@@ -658,6 +732,59 @@ vtest_sync_reset(struct vn_renderer *renderer,
     return vtest_sync_write(renderer, sync, initial_val);
  }
  
@@ -665,7 +748,7 @@ index 7aaebd2..6212e83 100644
  static int
  vtest_sync_export_syncobj(struct vn_renderer *renderer,
                            struct vn_renderer_sync *_sync,
-@@ -670,6 +796,14 @@ vtest_sync_export_syncobj(struct vn_renderer *renderer,
+@@ -670,6 +797,14 @@ vtest_sync_export_syncobj(struct vn_renderer *renderer,
     if (!sync_file || !vtest->has_venus_sync_fd)
        return -ENOTSUP;
  
@@ -680,7 +763,60 @@ index 7aaebd2..6212e83 100644
     /* Resolve the (binary) sync's signal point to the pending submit's
      * VkFence on the server and export a sync_file from it.  -1 means the
      * point already retired (already-signaled sync_file convention).
-@@ -1078,6 +1212,12 @@ vtest_destroy(struct vn_renderer *renderer,
+@@ -1032,6 +1167,44 @@ vtest_submit(struct vn_renderer *renderer,
+    return VK_SUCCESS;
+ }
+ 
++/* hand a sync_file to the server to become the semaphore's temporary
++ * payload; the server dups the fd (SCM_RIGHTS) so the caller keeps
++ * ownership.  The reply orders the import before later ring submissions.
++ */
++static VkResult
++vtest_semaphore_import_sync_fd(struct vn_renderer *renderer,
++                               uint64_t device_id,
++                               uint64_t semaphore_id,
++                               int sync_file_fd)
++{
++   struct vtest *vtest = (struct vtest *)renderer;
++   uint32_t vtest_hdr[VTEST_HDR_SIZE];
++   const uint32_t cmd[4] = {
++      (uint32_t)device_id,
++      (uint32_t)(device_id >> 32),
++      (uint32_t)semaphore_id,
++      (uint32_t)(semaphore_id >> 32),
++   };
++
++   mtx_lock(&vtest->sock_mutex);
++   vtest_hdr[VTEST_CMD_LEN] = ARRAY_SIZE(cmd);
++   vtest_hdr[VTEST_CMD_ID] = VCMD_SEMAPHORE_IMPORT_SYNC_FD;
++   vtest_write(vtest, vtest_hdr, sizeof(vtest_hdr));
++   vtest_write(vtest, cmd, sizeof(cmd));
++   if (vtest_send_fd(vtest, sync_file_fd)) {
++      mtx_unlock(&vtest->sock_mutex);
++      return VK_ERROR_DEVICE_LOST;
++   }
++
++   vtest_read(vtest, vtest_hdr, sizeof(vtest_hdr));
++   assert(vtest_hdr[VTEST_CMD_ID] == VCMD_SEMAPHORE_IMPORT_SYNC_FD);
++   uint32_t status;
++   vtest_read(vtest, &status, sizeof(status));
++   mtx_unlock(&vtest->sock_mutex);
++
++   return status ? VK_ERROR_INVALID_EXTERNAL_HANDLE : VK_SUCCESS;
++}
++
+ static void
+ vtest_init_renderer_info(struct vtest *vtest)
+ {
+@@ -1042,6 +1215,7 @@ vtest_init_renderer_info(struct vtest *vtest)
+ 
+    info->has_dma_buf_import = vtest->has_venus_sync_fd;
+    info->has_external_sync = vtest->has_venus_sync_fd;
++   info->has_semaphore_import = vtest->has_semaphore_import;
+    info->has_implicit_fencing = false;
+ 
+    const struct virgl_renderer_capset_venus *capset = &vtest->capset.data;
+@@ -1078,6 +1252,12 @@ vtest_destroy(struct vn_renderer *renderer,
        close(vtest->sock_fd);
     }
  
@@ -693,7 +829,7 @@ index 7aaebd2..6212e83 100644
     mtx_destroy(&vtest->sock_mutex);
     util_sparse_array_finish(&vtest->shmem_array);
     util_sparse_array_finish(&vtest->bo_array);
-@@ -1172,6 +1312,28 @@ vtest_init(struct vtest *vtest)
+@@ -1172,11 +1352,39 @@ vtest_init(struct vtest *vtest)
  
     vtest_vcmd_context_init(vtest, vtest->capset.id);
  
@@ -719,9 +855,20 @@ index 7aaebd2..6212e83 100644
 +         vn_log(vtest->instance, "fence timeline unavailable, using socket export");
 +   }
 +
++   vtest->has_semaphore_import =
++      vtest->has_venus_sync_fd &&
++      vtest_vcmd_get_param(vtest, VCMD_PARAM_HAS_SEMAPHORE_IMPORT) &&
++      !os_get_option("VTEST_NO_SEMAPHORE_IMPORT");
++
     vtest_init_renderer_info(vtest);
  
     vtest->base.ops.destroy = vtest_destroy;
+    vtest->base.ops.submit = vtest_submit;
+    vtest->base.ops.wait = vtest_wait;
++   vtest->base.ops.semaphore_import_sync_fd = vtest_semaphore_import_sync_fd;
+ 
+    vtest->base.shmem_ops.create = vtest_shmem_create;
+    vtest->base.shmem_ops.destroy = vtest_shmem_destroy;
 diff --git a/src/vulkan/runtime/vk_android.c b/src/vulkan/runtime/vk_android.c
 index fd9ee5d..f773a51 100644
 --- a/src/vulkan/runtime/vk_android.c
