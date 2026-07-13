@@ -37,6 +37,9 @@ optdepends=(
 )
 provides=('waydroid')
 conflicts=('waydroid')
+# keep binaries byte-identical to the attested release assets (and host strip
+# on bionic ELFs is not trustworthy)
+options=('!strip' '!debug')
 install=waydroid-nvidia.install
 source=(
   "waydroid-nvidia-${_tag#v}.tar.gz::$url/archive/refs/tags/$_tag.tar.gz"
@@ -54,8 +57,14 @@ noextract=(
   "waydroid-nvidia-guest-android-x86_64-$_tag.tar.zst"
   "waydroid-nvidia-guest-prebuilts-$_tag.tar.zst"
 )
-# TODO(release): replace SKIPs with real sums (updpkgsums) once $_tag assets exist.
-sha256sums=('SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP')
+sha256sums=('9cb881da32b1f04b0ddf17131598ae6dc8896ae99d1803238036a64c21a3f2b1'
+            'e7817beac7e26f7d54b2d9f49c847dab8e137c92e403825829e7abbd0b63c411'
+            '7f9bf436bc2d923832c7bb1bbdbf8f94f48b26cbd858f9c2e48ea9226266cfaa'
+            'cdaab0d27bedf3f68d78a99753a63139f6e40058c86d7f306a085dbf4b5d42e9'
+            'd83dc2fdc2b6892bbc6537b88a38d0e98b824bd29fa72ae87fbc12f2d53188ae'
+            '4bc083ac6fc8d0d0fd31546f5abd9912ca1304571d5a6c9ee42351b1e745193f'
+            '501db3b266f8a49f643d4054ba948ba40fcefe0fee1f3647bff955184acf533e'
+            '363a3a61d643c6acee6a4a3edc01b1a4880e9924ceb8c38d8113d92d5a8a71f3')
 
 prepare() {
   cd "waydroid-$_waydroid_sha"
