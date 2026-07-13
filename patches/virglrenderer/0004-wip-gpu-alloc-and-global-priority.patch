@@ -327,10 +327,10 @@ index b718ef2..1a5c533 100644
  
  static bool
 diff --git a/src/venus/vkr_context.c b/src/venus/vkr_context.c
-index c170bd3..3a4597a 100644
+index c170bd3..9b8992c 100644
 --- a/src/venus/vkr_context.c
 +++ b/src/venus/vkr_context.c
-@@ -5,10 +5,15 @@
+@@ -5,10 +5,19 @@
  
  #include "vkr_context.h"
  
@@ -341,12 +341,16 @@ index c170bd3..3a4597a 100644
  #include <sys/types.h>
  #include <unistd.h>
  
-+#include <drm/drm.h>
++/* the bundled UAPI header (src/drm/drm-uapi) — NOT <drm/drm.h>: the one-ioctl
++ * timeline import needs the kernel >= 6.16 syncobj UAPI (FD_TO_HANDLE
++ * FLAGS_TIMELINE + drm_syncobj_handle.point), which older distro headers
++ * lack; older kernels take the runtime EINVAL fallback instead. */
++#include "drm.h"
 +
  #include "util/anon_file.h"
  #include "venus-protocol/vn_protocol_renderer_dispatches.h"
  
-@@ -136,10 +141,11 @@ vkr_context_init_proc_table(struct vkr_context *ctx)
+@@ -136,10 +145,11 @@ vkr_context_init_proc_table(struct vkr_context *ctx)
  }
  
  bool
@@ -362,7 +366,7 @@ index c170bd3..3a4597a 100644
  {
     /* retire fence on cpu timeline directly */
     if (ring_idx == 0) {
-@@ -155,11 +161,309 @@ vkr_context_submit_fence(struct vkr_context *ctx,
+@@ -155,11 +165,309 @@ vkr_context_submit_fence(struct vkr_context *ctx,
     /* always merge fences */
     assert(!(flags & ~VIRGL_RENDERER_FENCE_FLAG_MERGEABLE));
     flags = VIRGL_RENDERER_FENCE_FLAG_MERGEABLE;
@@ -673,7 +677,7 @@ index c170bd3..3a4597a 100644
  int
  vkr_context_export_fence(struct vkr_context *ctx,
                           uint32_t ring_idx,
-@@ -644,6 +948,25 @@ vkr_context_destroy(struct vkr_context *ctx)
+@@ -644,6 +952,25 @@ vkr_context_destroy(struct vkr_context *ctx)
  
     vkr_context_wait_ring_fini(ctx);
  
@@ -699,7 +703,7 @@ index c170bd3..3a4597a 100644
     if (ctx->ring_monitor.started)
        vkr_context_ring_monitor_fini(ctx);
  
-@@ -727,6 +1050,11 @@ vkr_context_create(uint32_t ctx_id,
+@@ -727,6 +1054,11 @@ vkr_context_create(uint32_t ctx_id,
     if (!vkr_context_wait_ring_init(ctx))
        goto err_ctx_wait_ring_init;
  

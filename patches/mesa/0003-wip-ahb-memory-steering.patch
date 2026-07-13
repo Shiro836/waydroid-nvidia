@@ -37,10 +37,23 @@ index c8a1bbf..c622c5b 100644
  #define VCMD_GET_PARAM_SIZE 1
  #define VCMD_GET_PARAM_PARAM 0
 diff --git a/src/virtio/vulkan/meson.build b/src/virtio/vulkan/meson.build
-index 02a3d37..ec053df 100644
+index 02a3d37..2468e34 100644
 --- a/src/virtio/vulkan/meson.build
 +++ b/src/virtio/vulkan/meson.build
-@@ -79,6 +79,7 @@ libvn_files = files(
+@@ -66,6 +66,12 @@ _dev_icd = custom_target(
+ 
+ devenv.append('VK_DRIVER_FILES', _dev_icd.full_path())
+ 
++# vn_astc_emu.c needs vk_texcompress_astc in the lite runtime, whose SPIR-V is
++# compiled with glslang at build time — fail loudly instead of at link time.
++if not prog_glslang.found()
++  error('venus requires glslangValidator (ASTC emulation SPIR-V)')
++endif
++
+ libvn_files = files(
+   'vn_acceleration_structure.c',
+   'vn_buffer.c',
+@@ -79,6 +85,7 @@ libvn_files = files(
    'vn_feedback.c',
    'vn_host_copy.c',
    'vn_icd.c',
