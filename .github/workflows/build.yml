@@ -18,7 +18,7 @@ name: build
 
 on:
   push:
-    branches: [main]
+    branches: [main, ci-aur]
     tags: ['v*']
   pull_request:
   workflow_dispatch:
@@ -52,7 +52,7 @@ jobs:
         run: |
           sudo apt-get update -q
           sudo apt-get install -yq ninja-build python3-mako python3-yaml python3-pip bison flex pkg-config zstd
-          pip install --user meson
+          pipx install meson  # mesa needs meson >= 1.4.0; ubuntu-24.04 apt has 1.3.2
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
       - name: Fetch mesa at pinned base
         run: |
