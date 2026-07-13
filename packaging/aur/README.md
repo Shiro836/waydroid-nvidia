@@ -4,6 +4,25 @@ The endgame (Roadmap **M8.6**) is a reproducible AUR package. This directory
 holds the build recipe that gets there, plus a validator that continuously
 proves the stranger's build path.
 
+## Binary distribution (waydroid-nvidia-bin) + CI provenance
+
+`waydroid-nvidia-bin/` is the binary AUR package. Its native binaries come
+from GitHub release assets built by `.github/workflows/build.yml`, which
+reproduces the stranger's path on a fresh runner (fetch upstream at
+`packaging/ci/pins.env` SHAs → apply `patches/` → the same
+`build/<comp>/build.sh` recipes) and attaches **SLSA build-provenance
+attestations** — anyone can check a downloaded asset was built by that
+workflow from this repo:
+
+```sh
+gh attestation verify waydroid-nvidia-host-x86_64-<tag>.tar.zst --repo Shiro836/waydroid-nvidia
+```
+
+CI-built today: guest Venus driver (mesa), host renderer (virglrenderer),
+gralloc backend. Prebuilt until their provisioning is scripted (PREREQS.md):
+hwcomposer, ANGLE, surfaceflinger — uploaded as a separate release asset with
+sums in SHA256SUMS, explicitly *not* CI-attested yet.
+
 ## One recipe, two front-ends
 
 The build is **not** duplicated between "dev" and "AUR". There is one source of
