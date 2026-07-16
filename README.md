@@ -87,9 +87,13 @@ extensions.
 
 ### Requirements
 
-- NVIDIA proprietary driver (tested on 610.x; anything recent with
-  `VK_EXT_image_drm_format_modifier` and SYNC_FD fence support works) with
-  **`nvidia-drm.modeset=1`**.
+- NVIDIA proprietary driver **610.x or newer** (tested on 610.172) with
+  **`nvidia-drm.modeset=1`**; needs `VK_EXT_image_drm_format_modifier` and
+  SYNC_FD fence support. Older branches are known-broken: 595.x and earlier
+  ignore the explicit row stride when importing linear dmabufs through EGL
+  ([NVIDIA forum #364360](https://forums.developer.nvidia.com/t/364360)),
+  which shears/distorts the image at some window widths — verified fixed in
+  610.x (`tests/eglstride.c`).
 - A Wayland session (tested on KWin / Plasma 6).
 - The usual Waydroid kernel bits: binder (in-kernel binder or binderfs —
   default on Arch/zen and most modern kernels).

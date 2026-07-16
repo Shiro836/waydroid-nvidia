@@ -1183,24 +1183,25 @@ index c2bd278..387084f 100644
     'vtest.h'
  ]
 diff --git a/vtest/vtest.h b/vtest/vtest.h
-index fa74075..27a3802 100644
+index fa74075..5969851 100644
 --- a/vtest/vtest.h
 +++ b/vtest/vtest.h
-@@ -57,6 +57,13 @@ int vtest_get_context_poll_fd(struct vtest_context *ctx);
+@@ -56,6 +56,14 @@ void vtest_poll_context(struct vtest_context *ctx);
+ int vtest_get_context_poll_fd(struct vtest_context *ctx);
  
  void vtest_set_current_context(struct vtest_context *ctx);
- 
++const char *vtest_get_current_context_name(void);
++
 +/* VTEST_STATS instrumentation (vtest_server.c) */
 +void vtest_stats_count_import(bool query_only);
 +
 +int vtest_submit_cmd2_timeline(uint32_t length_dw);
 +int vtest_timeline_get(uint32_t length_dw);
 +int vtest_semaphore_import_sync_fd(uint32_t length_dw);
-+
+ 
  int vtest_send_caps(uint32_t length_dw);
  int vtest_send_caps2(uint32_t length_dw);
- int vtest_create_resource(uint32_t length_dw);
-@@ -96,6 +103,7 @@ int vtest_sync_write(uint32_t length_dw);
+@@ -96,6 +104,7 @@ int vtest_sync_write(uint32_t length_dw);
  int vtest_sync_wait(uint32_t length_dw);
  int vtest_sync_export_sync_file(uint32_t length_dw);
  int vtest_resource_import_blob(uint32_t length_dw);
@@ -1278,7 +1279,7 @@ index 3a7381f..95b0b0d 100644
     VCMD_SUBMIT_CMD2_FLAG_RING_IDX = 1 << 0,
     VCMD_SUBMIT_CMD2_FLAG_IN_FENCE_FD = 1 << 1,
 diff --git a/vtest/vtest_renderer.c b/vtest/vtest_renderer.c
-index f3212ad..4ef9fac 100644
+index f3212ad..3a9cbbb 100644
 --- a/vtest/vtest_renderer.c
 +++ b/vtest/vtest_renderer.c
 @@ -53,6 +53,7 @@
@@ -1289,7 +1290,21 @@ index f3212ad..4ef9fac 100644
  #include "vtest_protocol.h"
  #include "threadpool.h"
  
-@@ -970,6 +971,20 @@ int vtest_get_param(UNUSED uint32_t length_dw)
+@@ -865,6 +866,13 @@ static struct vtest_context *vtest_get_current_context(void)
+    return renderer.current_context;
+ }
+ 
++const char *vtest_get_current_context_name(void)
++{
++   const struct vtest_context *ctx = vtest_get_current_context();
++
++   return ctx && ctx->debug_name ? ctx->debug_name : "unknown";
++}
++
+ int vtest_ping_protocol_version(UNUSED uint32_t length_dw)
+ {
+    struct vtest_context *ctx = vtest_get_current_context();
+@@ -970,6 +978,20 @@ int vtest_get_param(UNUSED uint32_t length_dw)
        resp[0] = true;
        resp[1] = !!(renderer.ctx_flags & VIRGL_RENDERER_VENUS);
        break;
@@ -1310,7 +1325,7 @@ index f3212ad..4ef9fac 100644
     case VCMD_PARAM_HAS_TIMELINE_SYNCOBJ: {
  #ifdef ENABLE_DRM
        int fd = virgl_renderer_get_dev_fd(ctx->ctx_id);
-@@ -2238,7 +2253,8 @@ struct drm_virtgpu_execbuffer_syncobj {
+@@ -2238,7 +2260,8 @@ struct drm_virtgpu_execbuffer_syncobj {
  static int vtest_submit_cmd2_batch(struct vtest_context *ctx,
                                     const struct vcmd_submit_cmd2_batch *batch,
                                     const uint32_t *cmds,
@@ -1320,7 +1335,7 @@ index f3212ad..4ef9fac 100644
  {
     struct vtest_timeline_submit *submit = NULL;
     struct drm_virtgpu_execbuffer_syncobj *in_syncobj = NULL, *out_syncobj = NULL;
-@@ -2361,10 +2377,18 @@ static int vtest_submit_cmd2_batch(struct vtest_context *ctx,
+@@ -2361,10 +2384,18 @@ static int vtest_submit_cmd2_batch(struct vtest_context *ctx,
        uint64_t fence_id = (uintptr_t)submit;
  
        submit->timeline = timeline;
@@ -1343,7 +1358,7 @@ index f3212ad..4ef9fac 100644
        if (ret) {
           vtest_free_timeline_submit(submit);
           goto out;
-@@ -2439,6 +2463,7 @@ int vtest_resource_import_blob(uint32_t length_dw)
+@@ -2439,6 +2470,7 @@ int vtest_resource_import_blob(uint32_t length_dw)
     /* venus imports with size 0 when only querying memory properties (see
      * vn_get_memory_dma_buf_properties); derive the size from the dmabuf
      */
@@ -1351,7 +1366,7 @@ index f3212ad..4ef9fac 100644
     if (!size) {
        const off_t seek_size = lseek(fd, 0, SEEK_END);
        if (seek_size < 0) {
-@@ -2491,6 +2516,64 @@ int vtest_resource_import_blob(uint32_t length_dw)
+@@ -2491,6 +2523,64 @@ int vtest_resource_import_blob(uint32_t length_dw)
     return vtest_block_write(ctx->out_fd, resp_buf, sizeof(resp_buf)) >= 0 ? 0 : -1;
  }
  
@@ -1416,7 +1431,7 @@ index f3212ad..4ef9fac 100644
  int vtest_sync_export_sync_file(uint32_t length_dw)
  {
     struct vtest_context *ctx = vtest_get_current_context();
-@@ -2560,7 +2643,7 @@ int vtest_sync_export_sync_file(uint32_t length_dw)
+@@ -2560,7 +2650,7 @@ int vtest_sync_export_sync_file(uint32_t length_dw)
     return ret >= 0 ? 0 : ret;
  }
  
@@ -1425,7 +1440,7 @@ index f3212ad..4ef9fac 100644
  {
     struct vtest_context *ctx = vtest_get_current_context();
     uint32_t *submit_cmd2_buf;
-@@ -2611,7 +2694,9 @@ int vtest_submit_cmd2(uint32_t length_dw)
+@@ -2611,7 +2701,9 @@ int vtest_submit_cmd2(uint32_t length_dw)
           return -EINVAL;
        }
  
@@ -1436,7 +1451,7 @@ index f3212ad..4ef9fac 100644
        if (ret) {
           free(submit_cmd2_buf);
           return ret;
-@@ -2623,6 +2708,92 @@ int vtest_submit_cmd2(uint32_t length_dw)
+@@ -2623,6 +2715,92 @@ int vtest_submit_cmd2(uint32_t length_dw)
     return 0;
  }
  
@@ -1530,7 +1545,7 @@ index f3212ad..4ef9fac 100644
  
  int vtest_drm_sync_create(UNUSED uint32_t length_dw)
 diff --git a/vtest/vtest_server.c b/vtest/vtest_server.c
-index dcf1b19..2f59ea9 100644
+index dcf1b19..94584fe 100644
 --- a/vtest/vtest_server.c
 +++ b/vtest/vtest_server.c
 @@ -33,12 +33,16 @@
@@ -1611,7 +1626,7 @@ index dcf1b19..2f59ea9 100644
           vtest_poll_context(client->context);
           client->context_need_poll = false;
        }
-@@ -732,8 +776,35 @@ static const struct vtest_command {
+@@ -732,8 +776,37 @@ static const struct vtest_command {
     HANDLER(RESOURCE_EXPORT_FD,          resource_export_fd,        true   ),
     HANDLER(SYNC_EXPORT_SYNC_FILE,       sync_export_sync_file,     true   ),
     HANDLER(RESOURCE_IMPORT_BLOB,        resource_import_blob,      true   ),
@@ -1623,8 +1638,10 @@ index dcf1b19..2f59ea9 100644
  
 +static void vtest_stats_dump(void)
 +{
-+   fprintf(stderr, "vtest stats: polls %" PRIu64 ", imports query/real %" PRIu64
-+           "/%" PRIu64 "\n", vtest_stats.polls,
++   const char *context_name = vtest_get_current_context_name();
++
++   fprintf(stderr, "vtest stats [%s]: polls %" PRIu64 ", imports query/real %" PRIu64
++           "/%" PRIu64 "\n", context_name, vtest_stats.polls,
 +           vtest_stats_imports_query, vtest_stats_imports_real);
 +   vtest_stats.polls = 0;
 +   vtest_stats_imports_query = 0;
@@ -1633,9 +1650,9 @@ index dcf1b19..2f59ea9 100644
 +   for (uint32_t i = 0; i < ARRAY_SIZE(vtest_commands) && i < VTEST_STATS_MAX_CMDS; i++) {
 +      if (!vtest_stats.count[i])
 +         continue;
-+      fprintf(stderr, "vtest stats:   %-26s %7" PRIu64 " calls  avg %5" PRIu64
++      fprintf(stderr, "vtest stats [%s]:   %-26s %7" PRIu64 " calls  avg %5" PRIu64
 +              " us  total %" PRIu64 " us\n",
-+              vtest_commands[i].name ? vtest_commands[i].name : "?",
++              context_name, vtest_commands[i].name ? vtest_commands[i].name : "?",
 +              vtest_stats.count[i],
 +              vtest_stats.ns[i] / vtest_stats.count[i] / 1000,
 +              vtest_stats.ns[i] / 1000);
@@ -1647,7 +1664,7 @@ index dcf1b19..2f59ea9 100644
  static int vtest_client_dispatch_commands(struct vtest_client *client)
  {
     TRACE_FUNC();
-@@ -766,6 +837,8 @@ static int vtest_client_dispatch_commands(struct vtest_client *client)
+@@ -766,6 +839,8 @@ static int vtest_client_dispatch_commands(struct vtest_client *client)
  
     vtest_poll_resource_busy_wait();
     if (header[1] <= 0 || header[1] >= ARRAY_SIZE(vtest_commands)) {
@@ -1656,7 +1673,7 @@ index dcf1b19..2f59ea9 100644
        return VTEST_CLIENT_ERROR_COMMAND_ID;
     }
  
-@@ -785,8 +858,30 @@ static int vtest_client_dispatch_commands(struct vtest_client *client)
+@@ -785,8 +860,30 @@ static int vtest_client_dispatch_commands(struct vtest_client *client)
  
     vtest_set_current_context(client->context);
  
