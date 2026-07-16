@@ -1,7 +1,12 @@
 # Developer-only, not published (see README)
 STATE.md
 CLAUDE.md
+AGENTS.md
 docs/dev-workflow.md
+
+# Built artifacts (source is mcpe-vv-module/src/vvpatch.c)
+mcpe-vv-module/vvpatch
+mcpe-vv-module/src/vvpatch
 
 # Build outputs
 build/hwcomposer/out/
