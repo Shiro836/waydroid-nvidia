@@ -1,6 +1,8 @@
 # waydroid-nvidia
 
-**GPU-accelerated Waydroid on the NVIDIA proprietary driver — container-native, no VM.**
+**GPU-accelerated Waydroid on the NVIDIA driver — container-native, no VM.
+Needs the open kernel modules (`nvidia-open`); the userspace stays NVIDIA's
+regular proprietary stack.**
 
 [![build](https://github.com/Shiro836/waydroid-nvidia/actions/workflows/build.yml/badge.svg)](https://github.com/Shiro836/waydroid-nvidia/actions/workflows/build.yml)
 [![release](https://img.shields.io/github/v/release/Shiro836/waydroid-nvidia?include_prereleases)](https://github.com/Shiro836/waydroid-nvidia/releases)
@@ -37,7 +39,7 @@ Android app ── Vulkan ──▶ guest Mesa Venus (bionic)
                      host daemon (virglrenderer render server)
                               │ real Vulkan calls
                               ▼
-                NVIDIA proprietary driver (Open KM) ──▶ GPU
+      NVIDIA proprietary userspace (open kernel modules) ──▶ GPU
                               │ rendered buffer as dmabuf (zero-copy)
                               ▼
               guest gralloc imports ──▶ hwcomposer ──▶ KWin
@@ -87,13 +89,28 @@ extensions.
 
 ### Requirements
 
-- NVIDIA proprietary driver **610.x or newer** (tested on 610.172) with
+- **NVIDIA's open kernel modules + the regular proprietary userspace.**
+  NVIDIA's driver has two halves. The kernel module comes in two flavors:
+  `nvidia-open` / `nvidia-open-dkms` (open-source, NVIDIA's default for
+  Turing and newer) and `nvidia` / `nvidia-dkms` (legacy closed). The
+  userspace (`nvidia-utils`: Vulkan, GL, CUDA, NVENC) is the same
+  proprietary code with either one. This project **requires the open
+  kernel modules**: every buffer Android displays is exported from the
+  driver as a DMA-BUF, and NVIDIA supports DMA-BUF only on the open flavor
+  ([NVIDIA docs](https://docs.nvidia.com/datacenter/tesla/driver-installation-guide/kernel-modules.html),
+  [open-gpu-kernel-modules#243](https://github.com/NVIDIA/open-gpu-kernel-modules/discussions/243)).
+  So: `nvidia-open` users are exactly who this is for — "proprietary driver"
+  in these docs refers to the userspace, not the kernel module. The fully
+  open Mesa stack (nouveau/NVK) is a different world; stock Waydroid
+  already supports it on its own.
+- Driver version **610.x recommended** (tested on 610.172) with
   **`nvidia-drm.modeset=1`**; needs `VK_EXT_image_drm_format_modifier` and
-  SYNC_FD fence support. Older branches are known-broken: 595.x and earlier
-  ignore the explicit row stride when importing linear dmabufs through EGL
-  ([NVIDIA forum #364360](https://forums.developer.nvidia.com/t/364360)),
-  which shears/distorts the image at some window widths — verified fixed in
-  610.x (`tests/eglstride.c`).
+  SYNC_FD fence support. 595.71+ has been reported working in the field, on
+  `nvidia-open-dkms`
+  ([waydroid#1883](https://github.com/waydroid/waydroid/issues/1883#issuecomment-5037146083));
+  our allocator never relies on implied dmabuf strides, so the 595.45 EGL
+  stride bug ([NVIDIA forum #364360](https://forums.developer.nvidia.com/t/364360),
+  verified fixed in 610.x by `tests/eglstride.c`) should not affect this stack.
 - A Wayland session (tested on KWin / Plasma 6).
 - The usual Waydroid kernel bits: binder (in-kernel binder or binderfs —
   default on Arch/zen and most modern kernels).
