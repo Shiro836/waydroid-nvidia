@@ -12,9 +12,9 @@ what still needs scripting before a one-command `makepkg` works.
 | **mesa** (guest venus) | `build/mesa/build.sh` | ✅ yes — **CI-built** (build.yml) | none — NDK + meson + glslang makedeps |
 | **virglrenderer** (host) | `build/virglrenderer/build.sh` | ✅ yes — **CI-built** (build.yml) | none — meson + venus/vulkan headers |
 | **gralloc** backend | `build/gralloc/build.sh` | ✅ yes — **CI-built** (build.yml) | minigbm fetched at pin in CI |
-| **hwcomposer** | `build/hwcomposer/build.sh` | ⚠️ needs `$WNV` prereqs + rootfs | see below |
-| **ANGLE** | `build/angle/args.gn` | ❌ ~16 GB gclient sync | too heavy for free runners; prebuilt asset |
-| **surfaceflinger** | `build/lineage-20/build.sh` | ❌ ~154 GB AOSP tree | prebuilt asset (optional, >240 Hz only) |
+| **hwcomposer** | `build/hwcomposer/provision.sh` + `build.sh` | ✅ yes — **CI-built** (clean-room, hwc-pins.env) | none |
+| **ANGLE** | `build/angle/args.gn` | ✅ **CI-built** on tags/dispatch (~2 h, pinned ANGLE_SHA) | none |
+| **surfaceflinger** | `build/lineage-20/build.sh` | ✅ **CI-built** on the self-hosted runner (label: lineage) | runner host carries the synced tree |
 
 `reproduce.sh` (SRC_MODE=worktree default; `SRC_MODE=clone` for true from-scratch)
 already runs mesa+virgl+gralloc green on a provisioned box.

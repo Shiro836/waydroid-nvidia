@@ -3,7 +3,7 @@
 #   ./build.sh sf      -> fast path: just the surfaceflinger binary
 #   ./build.sh images  -> full systemimage + vendorimage
 # Logs to build-<target>.log. Applies waydroid patches + our patches/lineage-20.
-set -uo pipefail
+set -o pipefail  # no -u: AOSP envsetup and its functions are not set -u clean
 cd "$(dirname "$0")"
 TARGET="${1:-sf}"
 

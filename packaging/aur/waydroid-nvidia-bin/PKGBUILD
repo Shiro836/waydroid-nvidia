@@ -16,9 +16,9 @@
 #   gh attestation verify <file> --repo Shiro836/waydroid-nvidia
 
 pkgname=waydroid-nvidia-bin
-pkgver=0.1.0rc3
+pkgver=0.1.1
 pkgrel=1
-_tag=v0.1.0-rc3
+_tag=v0.1.1
 _waydroid_sha=a33a5c0b31d89d6ce687381104b30aff4dd2d330
 pkgdesc="Waydroid with NVIDIA GPU acceleration (Mesa Venus over vtest socket; needs the nvidia-open kernel modules)"
 arch=('x86_64')

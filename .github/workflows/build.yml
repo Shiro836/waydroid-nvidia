@@ -11,9 +11,10 @@
 # binary was built by THIS workflow from THIS repo:
 #   gh attestation verify <file> --repo <owner>/waydroid-nvidia
 #
-# Not built here yet (hand-provisioned prereqs; see PREREQS.md):
-# hwcomposer, ANGLE, lineage-20 surfaceflinger — shipped as separately
-# uploaded prebuilts until their provisioning is scripted.
+# Every component is CI-built: mesa/virgl/gralloc/hwcomposer on hosted
+# runners (hwcomposer via build/hwcomposer/provision.sh clean-room), ANGLE
+# on tags/dispatch (~2 h), surfaceflinger on the maintainer's self-hosted
+# runner (label: lineage) holding the lineage-20 tree.
 name: build
 
 on:
@@ -151,6 +152,119 @@ jobs:
           path: gralloc-out/libgbm_mesa_wrapper.so
           if-no-files-found: error
 
+  hwcomposer:
+    name: guest hwcomposer (clean-room, provision.sh)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Load pins
+        run: |
+          cat packaging/ci/pins.env | grep -v '^#' >> "$GITHUB_ENV"
+          cat packaging/ci/hwc-pins.env | grep -v '^#' >> "$GITHUB_ENV"
+      - name: Cache NDK
+        id: ndk-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/android-ndk
+          key: ndk-${{ env.NDK_VERSION }}
+      - name: Install NDK
+        if: steps.ndk-cache.outputs.cache-hit != 'true'
+        run: |
+          curl -sSfLo ndk.zip "https://dl.google.com/android/repository/android-ndk-${NDK_VERSION}-linux.zip"
+          if [ -n "$NDK_ZIP_SHA256" ]; then echo "$NDK_ZIP_SHA256  ndk.zip" | sha256sum -c; fi
+          unzip -q ndk.zip -d "$HOME"
+          mv "$HOME/android-ndk-${NDK_VERSION}" "$HOME/android-ndk"
+      - name: Host deps
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -yq cmake bison flex libssl-dev libjsoncpp-dev pkg-config \
+            meson ninja-build libwayland-bin libwayland-dev e2fsprogs unzip zstd
+      - name: Cache provisioned tree
+        uses: actions/cache@v4
+        with:
+          path: ~/wnv
+          key: hwc-wnv-${{ hashFiles('packaging/ci/hwc-pins.env') }}
+      - name: Fetch hwcomposer source at pinned base
+        run: |
+          git init -q hwc-src
+          git -C hwc-src fetch -q --depth 1 "$HWC_UPSTREAM" "$HWC_SHA"
+          git -C hwc-src checkout -q FETCH_HEAD
+          git -C hwc-src apply "$GITHUB_WORKSPACE"/patches/hwcomposer/0001-*.patch
+      - name: Provision (clones, hidl-gen, headers, static deps, image libs)
+        run: REPO="$GITHUB_WORKSPACE" NDK="$HOME/android-ndk" ./build/hwcomposer/provision.sh "$HOME/wnv" "$PWD/hwc-src"
+      - name: Build hwcomposer.waydroid.so
+        run: |
+          WNV="$HOME/wnv" ROOTFS="$HOME/wnv/image-rootfs" NDK="$HOME/android-ndk" \
+            ./build/hwcomposer/build.sh "$PWD/hwc-src/hwcomposer" "$PWD/hwc-out"
+          mkdir -p stage
+          cp hwc-out/hwcomposer.waydroid.stripped.so stage/hwcomposer.waydroid.so
+      - uses: actions/upload-artifact@v4
+        with:
+          name: guest-hwcomposer
+          path: stage/*
+          if-no-files-found: error
+
+  angle:
+    name: guest ANGLE (tags only, ~2h)
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Load pins
+        run: cat packaging/ci/pins.env | grep -v '^#' >> "$GITHUB_ENV"
+      - name: Work area on /mnt (the 16 GB sync does not fit on /)
+        run: sudo mkdir -p /mnt/angle && sudo chown "$USER" /mnt/angle
+      - name: Fetch ANGLE at pinned commit
+        working-directory: /mnt/angle
+        run: |
+          git clone -q https://chromium.googlesource.com/chromium/tools/depot_tools.git
+          export PATH="/mnt/angle/depot_tools:$PATH"
+          git init -q angle
+          git -C angle fetch -q "$ANGLE_UPSTREAM" "$ANGLE_SHA"
+          git -C angle checkout -q FETCH_HEAD
+          cd angle
+          python3 scripts/bootstrap.py
+          sed -i "s/^target_os = .*/target_os = ['android']/" ../.gclient 2>/dev/null || \
+            echo "target_os = ['android']" >> .gclient
+          gclient sync --no-history -j8
+      - name: Build the three ANGLE libraries
+        working-directory: /mnt/angle/angle
+        run: |
+          export PATH="/mnt/angle/depot_tools:$PATH"
+          mkdir -p out/AndroidX64
+          cp "$GITHUB_WORKSPACE/build/angle/args.gn" out/AndroidX64/args.gn
+          buildtools/linux64/gn gen out/AndroidX64
+          third_party/ninja/ninja -C out/AndroidX64 libEGL libGLESv2 libGLESv1_CM
+          mkdir -p "$GITHUB_WORKSPACE/stage"
+          cp out/AndroidX64/libEGL_angle.so out/AndroidX64/libGLESv2_angle.so \
+             out/AndroidX64/libGLESv1_CM_angle.so "$GITHUB_WORKSPACE/stage/"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: guest-angle
+          path: stage/*
+          if-no-files-found: error
+
+  surfaceflinger:
+    name: guest surfaceflinger (self-hosted, lineage tree)
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    runs-on: [self-hosted, lineage]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build surfaceflinger from the lineage-20 tree
+        run: |
+          # the runner host carries the synced tree (PREREQS.md); the script
+          # applies waydroid patches + patches/lineage-20 and builds just SF
+          TREE="${LINEAGE_TREE:-$HOME/repos/waydroid-nv/lineage-20}"
+          [ -d "$TREE" ] || { echo "::error::lineage tree missing at $TREE"; exit 1; }
+          (cd "$TREE" && ./build.sh sf)
+          mkdir -p stage
+          cp "$TREE/out/target/product/waydroid_x86_64/system/bin/surfaceflinger" stage/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: guest-surfaceflinger
+          path: stage/*
+          if-no-files-found: error
+
   waydroid-patch-check:
     name: waydroid patch applies at pinned base
     runs-on: ubuntu-latest
@@ -169,7 +283,7 @@ jobs:
   release:
     name: release (tarballs + SHA256SUMS + provenance)
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [mesa, virglrenderer, gralloc, waydroid-patch-check]
+    needs: [mesa, virglrenderer, gralloc, hwcomposer, angle, surfaceflinger, waydroid-patch-check]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -189,6 +303,12 @@ jobs:
           # guest side (android-x86_64): venus driver + gralloc backend
           mkdir -p guest && cp artifacts/guest-vulkan-virtio/* artifacts/guest-gralloc/* guest/
           tar --zstd -C guest -cf "out/waydroid-nvidia-guest-android-x86_64-${TAG}.tar.zst" .
+          # guest prebuilts — now CI-built and attested like everything else
+          mkdir -p prebuilts
+          cp artifacts/guest-hwcomposer/* artifacts/guest-angle/* artifacts/guest-surfaceflinger/* prebuilts/
+          (cd prebuilts && sha256sum ./* > SHA256SUMS.prebuilts)
+          printf 'CI-built guest prebuilts: hwcomposer (provision.sh clean-room),\nANGLE (pinned %s), surfaceflinger (lineage-20 tree, self-hosted runner).\n' "${ANGLE_SHA:-see pins}" > prebuilts/README.txt
+          tar --zstd -C prebuilts -cf "out/waydroid-nvidia-guest-prebuilts-${TAG}.tar.zst" .
           (cd out && sha256sum ./*.tar.zst > SHA256SUMS)
           cat out/SHA256SUMS
       - name: Attest build provenance
@@ -200,13 +320,12 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           TAG="${GITHUB_REF_NAME}"
-          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --prerelease \
+          # rc tags publish as prereleases; plain version tags as full releases
+          PRE=""; case "$TAG" in *-rc*) PRE="--prerelease" ;; esac
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" $PRE \
             --title "waydroid-nvidia $TAG" \
-            --notes "CI-built from patches/ at the pinned bases (packaging/ci/pins.env).
-          Verify any asset's provenance with:
-          \`gh attestation verify <file> --repo $GITHUB_REPOSITORY\`
-
-          The guest prebuilts tarball (hwcomposer, ANGLE, surfaceflinger) is uploaded
-          separately until its build provisioning is scripted in CI — recipes live in
-          build/hwcomposer, build/angle, build/lineage-20; see packaging/aur/PREREQS.md." \
+            --notes "Every asset is CI-built from pinned sources and carries a SLSA
+          provenance attestation (the surfaceflinger build runs on the maintainer's
+          registered self-hosted runner; its provenance says so). Verify with:
+          \`gh attestation verify <file> --repo $GITHUB_REPOSITORY\`" \
             out/*.tar.zst out/SHA256SUMS

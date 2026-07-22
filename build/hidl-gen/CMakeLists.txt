@@ -6,9 +6,10 @@ set(CMAKE_CXX_COMPILER clang++)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 add_compile_options(-Wno-error -Wno-deprecated-declarations "SHELL:-include ${CMAKE_CURRENT_SOURCE_DIR}/compat.h")
-set(CORE $ENV{HOME}/repos/waydroid-nv/aosp_system_core)
+set(WNV $ENV{HOME}/repos/waydroid-nv CACHE PATH "prereq tree root")
+set(CORE ${WNV}/aosp_system_core)
 
-set(WNV $ENV{HOME}/repos/waydroid-nv)
+
 set(HIDL ${WNV}/aosp_hidl)
 set(LIBBASE ${WNV}/aosp_libbase)
 set(LIBLOG ${WNV}/android_system_logging/liblog)
