@@ -1,0 +1,75 @@
+#!/usr/bin/env bash
+# monitor — correlated Waydroid/Venus workload capture.
+# Usage: dev/monitor [seconds] [label] [package]
+DEV="$(dirname "$(readlink -f "$0")")"
+source "$DEV/env.sh"
+need_sudo
+set +e +o pipefail
+
+SECS="${1:-20}"
+LABEL="${2:-capture}"
+PKG="${3:-$(guest 'getprop waydroid.active_apps' 2>/dev/null | tail -1)}"
+PKG="${PKG%%,*}"
+[ -n "$PKG" ] || PKG=com.mojang.minecraftpe
+[[ "$SECS" =~ ^[0-9]+$ ]] && ((SECS >= 10)) || die "seconds must be an integer >= 10"
+SAFE_LABEL="$(printf '%s' "$LABEL" | tr -cs 'A-Za-z0-9._-' '_')"
+ROOT="${MONITOR_ROOT:-${XDG_STATE_HOME:-$HOME/.local/state}/waydroid-nvidia/captures}"
+RUN="$ROOT/$(date +%Y%m%d-%H%M%S)-$SAFE_LABEL"
+mkdir -p "$RUN"
+
+ENVIRONMENT="$(systemctl --user show "$VENUS_UNIT" -p Environment --value 2>/dev/null)"
+STATS_PERIOD="$(printf '%s\n' "$ENVIRONMENT" | sed -n 's/.*VTEST_STATS=\([0-9][0-9]*\).*/\1/p')"
+STATS_PERIOD="${STATS_PERIOD:-0}"
+((STATS_PERIOD > 0)) || die "wd-venus has no VTEST_STATS interval; enable it before capture"
+
+START="$(date '+%Y-%m-%d %H:%M:%S')"
+VENUS_PID_BEFORE="$(systemctl --user show "$VENUS_UNIT" -p MainPID --value)"
+RESTARTS_BEFORE="$(systemctl --user show "$VENUS_UNIT" -p NRestarts --value)"
+CRASHES_BEFORE="$(guest 'logcat -d -b crash 2>/dev/null | grep -c "Cmdline:\|Fatal signal"; :' | tail -1)"
+cat >"$RUN/meta.env" <<EOF
+label=$LABEL
+package=$PKG
+seconds=$SECS
+stats_period=$STATS_PERIOD
+start=$START
+venus_pid_before=$VENUS_PID_BEFORE
+restarts_before=$RESTARTS_BEFORE
+crashes_before=${CRASHES_BEFORE:-0}
+EOF
+
+printf '%s\n' 'timestamp,util_gpu,util_mem,memory_mib,power_w,power_limit_w,sm_mhz,mem_mhz,temp_c,pstate' >"$RUN/gpu.csv"
+nvidia-smi --query-gpu=timestamp,utilization.gpu,utilization.memory,memory.used,power.draw,power.limit,clocks.sm,clocks.mem,temperature.gpu,pstate \
+  --format=csv,noheader,nounits -lms 250 >>"$RUN/gpu.csv" 2>"$RUN/gpu.err" &
+SMI_PID=$!
+
+cleanup() {
+  kill "$SMI_PID" 2>/dev/null
+  wait "$SMI_PID" 2>/dev/null
+  guest 'dumpsys SurfaceFlinger --timestats -disable' >/dev/null 2>&1
+}
+trap cleanup EXIT INT TERM
+
+guest 'dumpsys SurfaceFlinger --timestats -clear -enable' >/dev/null || die "cannot enable SurfaceFlinger TimeStats"
+say "CAPTURE NOW: '$LABEL' — move normally in $PKG for ${SECS}s"
+sleep "$SECS"
+END="$(date '+%Y-%m-%d %H:%M:%S')"
+guest 'dumpsys SurfaceFlinger --timestats -dump' >"$RUN/timestats.txt"
+guest 'dumpsys SurfaceFlinger --timestats -disable' >/dev/null
+kill "$SMI_PID" 2>/dev/null; wait "$SMI_PID" 2>/dev/null
+trap - EXIT INT TERM
+
+journalctl --user -u "$VENUS_UNIT" --since "$START" --until "$END" -o json --no-pager >"$RUN/venus.jsonl"
+journalctl --user -t kwin_wayland --since "$START" --until "$END" --no-pager >"$RUN/kwin.log"
+ps -eo pid,ppid,pcpu,rss,stat,comm,args --forest >"$RUN/processes.txt"
+VENUS_PID_AFTER="$(systemctl --user show "$VENUS_UNIT" -p MainPID --value)"
+RESTARTS_AFTER="$(systemctl --user show "$VENUS_UNIT" -p NRestarts --value)"
+CRASHES_AFTER="$(guest 'logcat -d -b crash 2>/dev/null | grep -c "Cmdline:\|Fatal signal"; :' | tail -1)"
+cat >>"$RUN/meta.env" <<EOF
+end=$END
+venus_pid_after=$VENUS_PID_AFTER
+restarts_after=$RESTARTS_AFTER
+crashes_after=${CRASHES_AFTER:-0}
+EOF
+
+"$DEV/monitor-report" "$RUN" | tee "$RUN/summary.txt"
+say "capture saved: $RUN"
