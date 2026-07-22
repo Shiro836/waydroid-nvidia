@@ -6,7 +6,7 @@ set(CMAKE_CXX_COMPILER clang++)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 add_compile_options(-Wno-error -Wno-deprecated-declarations "SHELL:-include ${CMAKE_CURRENT_SOURCE_DIR}/compat.h")
-set(WNV $ENV{HOME}/repos/waydroid-nv CACHE PATH "prereq tree root")
+set(WNV "$ENV{HOME}/repos/waydroid-nv" CACHE PATH "prereq tree root (override with -DWNV=)")
 set(CORE ${WNV}/aosp_system_core)
 
 
@@ -104,7 +104,7 @@ add_library(hidl-gen-core STATIC
   ${HIDL}/TypeDef.cpp
   ${HIDL}/VectorType.cpp
 )
-target_include_directories(hidl-gen-core PUBLIC ${HIDL} ${JSONCPP_INCLUDE_DIRS} ${CORE}/libutils/include ${CORE}/libcutils/include $ENV{HOME}/repos/waydroid-nv/aosp_libhwbinder/include)
+target_include_directories(hidl-gen-core PUBLIC ${HIDL} ${JSONCPP_INCLUDE_DIRS} ${CORE}/libutils/include ${CORE}/libcutils/include ${WNV}/aosp_libhwbinder/include)
 target_link_libraries(hidl-gen-core PUBLIC base hidl-gen-utils hidl-gen-host-utils hidl-gen-hash ${JSONCPP_LIBRARIES})
 
 BISON_TARGET(hidl_y ${HIDL}/hidl-gen_y.yy ${CMAKE_CURRENT_BINARY_DIR}/hidl-gen_y.cpp

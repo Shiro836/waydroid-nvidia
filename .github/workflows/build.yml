@@ -224,8 +224,13 @@ jobs:
           git -C angle checkout -q FETCH_HEAD
           cd angle
           python3 scripts/bootstrap.py
-          sed -i "s/^target_os = .*/target_os = ['android']/" ../.gclient 2>/dev/null || \
+          # bootstrap.py writes .gclient in the angle dir and may already
+          # define target_os — replace it there, append only if absent
+          if grep -q '^target_os' .gclient 2>/dev/null; then
+            sed -i "s/^target_os = .*/target_os = ['android']/" .gclient
+          else
             echo "target_os = ['android']" >> .gclient
+          fi
           gclient sync --no-history -j8
       - name: Build the three ANGLE libraries
         working-directory: /mnt/angle/angle
