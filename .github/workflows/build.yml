@@ -178,7 +178,7 @@ jobs:
         run: |
           sudo apt-get update -q
           sudo apt-get install -yq cmake bison flex libssl-dev libjsoncpp-dev pkg-config \
-            meson ninja-build libwayland-bin libwayland-dev e2fsprogs unzip zstd
+            meson ninja-build libexpat1-dev e2fsprogs unzip zstd xz-utils
       - name: Cache provisioned tree
         uses: actions/cache@v4
         with:

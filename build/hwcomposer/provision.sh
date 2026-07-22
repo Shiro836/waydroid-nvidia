@@ -144,11 +144,24 @@ cpu = 'x86_64'
 endian = 'little'
 EOF
 
-    # wayland (meson; client libs only, scanner from the host)
+    # wayland (meson; client libs only). The cross build needs a NATIVE
+    # wayland-scanner >= the target version — distro scanners can be older
+    # (Ubuntu 24.04: 1.22 vs our 1.25), so build one from the same tarball.
     if [ ! -e "$PREFIX/lib/libwayland-client.a" ]; then
         curl -sSfLo "$WNV/dl/wayland.tar.xz" "$WAYLAND_URL"
         rm -rf "$WNV/build-wayland"; mkdir -p "$WNV/build-wayland"
         tar -C "$WNV/build-wayland" --strip-components=1 -xJf "$WNV/dl/wayland.tar.xz"
+        NATPREFIX="$WNV/native-prefix"
+        if [ ! -x "$NATPREFIX/bin/wayland-scanner" ]; then
+            env -u CC -u CXX -u AR -u RANLIB -u STRIP \
+                meson setup "$WNV/build-wayland/native" "$WNV/build-wayland" \
+                -Dprefix="$NATPREFIX" -Dlibraries=false -Dscanner=true \
+                -Ddocumentation=false -Dtests=false -Ddtd_validation=false >/dev/null
+            ninja -C "$WNV/build-wayland/native" install >/dev/null
+            echo "  native wayland-scanner $WAYLAND_VERSION"
+        fi
+        export PKG_CONFIG_PATH_FOR_BUILD="$NATPREFIX/lib/x86_64-linux-gnu/pkgconfig:$NATPREFIX/lib/pkgconfig:$NATPREFIX/share/pkgconfig"
+        export PATH="$NATPREFIX/bin:$PATH"
         meson setup "$WNV/build-wayland/b" "$WNV/build-wayland" --cross-file "$CROSS" \
             -Ddefault_library=static -Dprefix="$PREFIX" \
             -Ddocumentation=false -Dtests=false -Ddtd_validation=false \
