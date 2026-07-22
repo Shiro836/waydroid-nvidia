@@ -37,7 +37,16 @@ if [ ! -e /usr/share/vulkan/icd.d/nvidia_icd.json ] && [ -e /usr/lib/x86_64-linu
 fi
 
 echo "== probe:"
-./nvimportprobe-portable
+if [ -x ./nvimportprobe-portable ]; then PROBE=./nvimportprobe-portable
+elif [ -x ./nvimportprobe ]; then PROBE=./nvimportprobe
+else
+    # build it right here if a compiler is available (repo checkout case)
+    if command -v gcc >/dev/null && [ -f "$(dirname "$0")/nvimportprobe.c" ]; then
+        gcc -O1 -o ./nvimportprobe "$(dirname "$0")/nvimportprobe.c" -ldl && PROBE=./nvimportprobe
+    fi
+fi
+[ -n "${PROBE:-}" ] || { echo "no probe binary and no way to build one (need gcc)"; exit 2; }
+"$PROBE"
 rc=$?
 echo "== exit $rc  (0=fine, 1=QUIRK FOUND, 2=env broken, 3=host untestable)"
 exit $rc

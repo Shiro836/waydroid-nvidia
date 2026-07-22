@@ -1,0 +1,143 @@
+#!/usr/bin/env bash
+# mcdrive — drive Minecraft Bedrock autonomously (mode switch, launch, world
+# entry, movement, screencaps) via input-pipe injection. No host cursor is
+# touched: dev/wlinject records go straight into the container FIFOs that
+# waydroid's hwc normally feeds (see STATE.md 2026-07-16 night).
+#
+#   mcdrive set-mode {fancy|vv}    edit options.txt graphics_mode (app stopped)
+#                                  WARNING: graphics_mode:3 is NOT applied at
+#                                  boot — the game always boots Fancy. For VV
+#                                  use vvui after launch (see below).
+#   mcdrive vvui                   click Settings->Video->Vibrant Visuals at
+#                                  the MAIN MENU + wait out the ~1 min
+#                                  transition. Verify: cap HUD says
+#                                  "OpenGLES PBR ESSL_310" (Fancy lacks PBR).
+#   mcdrive launch                 force-stop + start + wait for main menu
+#   mcdrive enter-world            click Play -> first world card -> wait
+#   mcdrive walk SECONDS           hold W + slow right pan (capture choreography)
+#   mcdrive click X Y              one left click at guest coords
+#   mcdrive keypress CODE [MS]     press+release a key (Linux evdev code)
+#   mcdrive cap NAME               screencap; prints host path
+#   mcdrive stop                   Esc (world save) + force-stop
+#   mcdrive cycle {fancy|vv}       set-mode + launch + enter-world (+caps)
+#
+# Coordinates assume the guest at 2560x1440, GUI scale 3 (current defaults).
+# Verify with `mcdrive cap` when menus change after a game update.
+source "$(dirname "$0")/env.sh"
+set +o pipefail   # grep -q / head in pipelines must not kill us (see STATE.md)
+
+PKG=com.mojang.minecraftpe
+OPTS=/data/data/$PKG/games/com.mojang/minecraftpe/options.txt
+PTR_PIPE=/dev/input/wl_pointer_events
+KBD_PIPE=/dev/input/wl_keyboard_events
+CAP_HOST_DIR="$HOME/.local/share/waydroid/data/local/tmp"
+
+# menu geometry (guest px). Ore UI positions are stable per version+scale.
+PLAY_X=1276  PLAY_Y=828        # "Play" on the main menu
+WORLD_X=559  WORLD_Y=384       # first world card on the Worlds tab
+MENU_WAIT=${MENU_WAIT:-25}     # s from am start to interactive main menu
+WORLD_WAIT=${WORLD_WAIT:-20}   # s from world click to in-world
+
+BTN_LEFT=272 KEY_ESC=1 KEY_W=17
+
+# stream stdin-generated events into a container input FIFO.
+# NOT guest(): that one closes stdin; this one must stream it.
+inject() { # inject <pipe> <wlinject args...>
+    local pipe=$1; shift
+    "$REPO/dev/wlinject" "$@" | \
+        sudo -n lxc-attach $LXC --clear-env -v PATH=/system/bin -- \
+            /system/bin/sh -c "cat > $pipe" 2> >(cat >&2)
+}
+
+alive() { [ "$(guest "ps -A | grep -c $PKG")" != "0" ]; }
+
+case "${1:-}" in
+set-mode)
+    case "${2:-}" in
+        fancy) mode=1 ;;
+        vv)    mode=3 ;;
+        *) die "set-mode needs fancy|vv" ;;
+    esac
+    say "set graphics_mode:$mode (${2})"
+    guest "am force-stop $PKG"
+    sleep 1
+    guest "sed -i 's/^graphics_mode:.*/graphics_mode:$mode/' $OPTS && grep '^graphics_mode' $OPTS"
+    ;;
+vvui)
+    # VV cannot be pre-set on disk (2026-07-17 finding): the game boots Fancy
+    # regardless of graphics_mode:3 and the UI switch writes nothing back to
+    # options.txt — it must be re-clicked once per process, at the MAIN MENU
+    # (in-world the Mode buttons are disabled while "In-game graphics mode
+    # switching" is off). Coordinates assume the design-preview settings UI;
+    # the sidebar is stable even though content opens on the last section.
+    alive || die "$PKG not running — launch first"
+    say "UI-switching to Vibrant Visuals at main menu (~80s incl. transition)"
+    "$0" click 1280 923;  sleep 3     # Settings
+    "$0" click 426 804;   sleep 2     # Video (sidebar)
+    "$0" click 1731 1234; sleep 75    # Vibrant Visuals + transition
+    "$0" keypress $KEY_ESC            # back to main menu
+    sleep 2
+    say "verify with: $0 cap vv-menu  (HUD must say 'OpenGLES PBR')"
+    ;;
+launch)
+    say "launching $PKG (menu in ~${MENU_WAIT}s)"
+    guest "am force-stop $PKG"
+    sleep 1
+    guest "am start -n $PKG/.MainActivity" >/dev/null
+    sleep "$MENU_WAIT"
+    alive || die "$PKG not running after launch"
+    say "menu should be up (verify: $0 cap menu)"
+    ;;
+enter-world)
+    say "clicking Play ($PLAY_X,$PLAY_Y)"
+    inject $PTR_PIPE move $PLAY_X $PLAY_Y ';' sleep 150 ';' btn $BTN_LEFT 1 ';' sleep 70 ';' btn $BTN_LEFT 0
+    sleep 3
+    say "clicking world card ($WORLD_X,$WORLD_Y); loading ~${WORLD_WAIT}s"
+    inject $PTR_PIPE move $WORLD_X $WORLD_Y ';' sleep 150 ';' btn $BTN_LEFT 1 ';' sleep 70 ';' btn $BTN_LEFT 0
+    sleep "$WORLD_WAIT"
+    alive || die "$PKG died entering world"
+    say "in-world (verify: $0 cap world)"
+    ;;
+walk)
+    secs=${2:-10}
+    say "walk: W-hold + slow pan for ${secs}s"
+    inject $KBD_PIPE key $KEY_W 1
+    # 25 pan steps/s; stdin stream paces the pointer pipe
+    steps=$((secs * 25))
+    args=()
+    for ((i = 0; i < steps; i++)); do args+=(rel 8 0 ';' sleep 40 ';'); done
+    inject $PTR_PIPE "${args[@]::${#args[@]}-1}"
+    inject $KBD_PIPE key $KEY_W 0
+    ;;
+click)
+    inject $PTR_PIPE move "$2" "$3" ';' sleep 120 ';' btn $BTN_LEFT 1 ';' sleep 70 ';' btn $BTN_LEFT 0
+    ;;
+keypress)
+    inject $KBD_PIPE key "$2" 1 ';' sleep "${3:-70}" ';' key "$2" 0
+    ;;
+cap)
+    name=${2:-mcdrive}
+    guest "screencap -p /data/local/tmp/$name.png" >/dev/null
+    echo "$CAP_HOST_DIR/$name.png"
+    ;;
+stop)
+    say "Esc (save) + force-stop"
+    inject $KBD_PIPE key $KEY_ESC 1 ';' sleep 60 ';' key $KEY_ESC 0 || true
+    sleep 3
+    guest "am force-stop $PKG"
+    ;;
+cycle)
+    [ -n "${2:-}" ] || die "cycle needs fancy|vv"
+    "$0" set-mode "$2"
+    "$0" launch
+    [ "$2" = vv ] && "$0" vvui   # boot ignores graphics_mode:3 — see vvui
+    "$0" cap "cycle-$2-menu"
+    "$0" enter-world
+    "$0" cap "cycle-$2-world"
+    say "cycle $2: in-world and idle — start captures, then '$0 walk N' + '$0 stop'"
+    ;;
+*)
+    sed -n '3,25p' "$0" | sed 's/^# \{0,1\}//'
+    exit 1
+    ;;
+esac

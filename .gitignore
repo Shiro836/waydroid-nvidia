@@ -1,8 +1,5 @@
 # Developer-only, not published (see README)
 STATE.md
-CLAUDE.md
-AGENTS.md
-docs/dev-workflow.md
 
 # Built artifacts (source is mcpe-vv-module/src/vvpatch.c)
 mcpe-vv-module/vvpatch
@@ -33,3 +30,7 @@ tests/vnprobe
 .idea/
 *.swp
 .DS_Store
+
+# Test binaries (built on demand by tests/run-probe.sh)
+tests/nvimportprobe
+tests/nvimportprobe-portable

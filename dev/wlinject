@@ -1,0 +1,77 @@
+#!/usr/bin/env python3
+# wlinject — emit waydroid-hwc-style input_event records on stdout.
+# The records mimic hwcomposer's wayland-hwc.cpp writers exactly, so piping
+# them into the container's /dev/input/wl_pointer_events (pointer/buttons)
+# or /dev/input/wl_keyboard_events (keys) is indistinguishable from real
+# host input at the Android level (EventHub reads these FIFOs as devices).
+# Used by dev/mcdrive; see STATE.md log 2026-07-16 (night).
+#
+# Commands (';'-separated argv groups):
+#   move X Y     EV_ABS ABS_X/Y + EV_REL dx/dy + SYN in one write (like hwc
+#                pointer_handle_motion; REL derived from /tmp/wlinject.pos)
+#   rel DX DY    EV_REL + SYN (pointer-locked camera, handle_relative_motion)
+#   btn CODE ST  EV_KEY + SYN on the pointer pipe (BTN_LEFT=272, BTN_RIGHT=273)
+#   key CODE ST  bare EV_KEY, no SYN (keyboard pipe convention; KEY_ESC=1,
+#                KEY_W=17, KEY_A=30, KEY_S=31, KEY_D=32, KEY_SPACE=57)
+#   sleep MS     pause between events (paces multi-step sequences)
+#
+# Example: wlinject move 100 200 ';' sleep 80 ';' btn 272 1 ';' sleep 60 ';' btn 272 0
+import struct
+import sys
+import time
+
+EV_SYN, EV_KEY, EV_REL, EV_ABS = 0, 1, 2, 3
+ABS_X, ABS_Y, REL_X, REL_Y, SYN_REPORT = 0, 1, 0, 1, 0
+STATE = "/tmp/wlinject.pos"
+
+
+def ev(t, c, v):
+    # struct input_event, x86_64: struct timeval (16) + u16 type + u16 code + s32 value
+    now = time.clock_gettime(time.CLOCK_MONOTONIC)  # container shares the kernel
+    sec = int(now)
+    return struct.pack("qqHHi", sec, int((now - sec) * 1e6), t, c, v)
+
+
+def flush(events):
+    sys.stdout.buffer.write(b"".join(events))
+    sys.stdout.buffer.flush()
+
+
+def prev_pos():
+    try:
+        x, y = open(STATE).read().split()
+        return int(x), int(y)
+    except Exception:
+        return 0, 0
+
+
+groups, cur = [], []
+for a in sys.argv[1:]:
+    if a == ";":
+        groups.append(cur)
+        cur = []
+    else:
+        cur.append(a)
+if cur:
+    groups.append(cur)
+
+for g in groups:
+    cmd = g[0]
+    if cmd == "move":
+        x, y = int(g[1]), int(g[2])
+        px, py = prev_pos()
+        flush([ev(EV_ABS, ABS_X, x), ev(EV_ABS, ABS_Y, y),
+               ev(EV_REL, REL_X, x - px), ev(EV_REL, REL_Y, y - py),
+               ev(EV_SYN, SYN_REPORT, 0)])
+        open(STATE, "w").write(f"{x} {y}")
+    elif cmd == "rel":
+        flush([ev(EV_REL, REL_X, int(g[1])), ev(EV_REL, REL_Y, int(g[2])),
+               ev(EV_SYN, SYN_REPORT, 0)])
+    elif cmd == "btn":
+        flush([ev(EV_KEY, int(g[1]), int(g[2])), ev(EV_SYN, SYN_REPORT, 0)])
+    elif cmd == "key":
+        flush([ev(EV_KEY, int(g[1]), int(g[2]))])
+    elif cmd == "sleep":
+        time.sleep(int(g[1]) / 1000.0)
+    else:
+        sys.exit(f"wlinject: unknown command {cmd!r}")

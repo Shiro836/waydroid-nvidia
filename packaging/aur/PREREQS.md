@@ -1,9 +1,11 @@
-# Build prerequisites — the remaining gap before a fully clean-room package
+# Build prerequisites — status: CLOSED (all components clean-room since v0.1.1)
 
-`packaging/aur/reproduce.sh` proves the **stranger's clone→apply→build** path
-for the two components that are fully self-contained today, and compiles the
-other two against hand-provisioned trees. This file is the honest inventory of
-what still needs scripting before a one-command `makepkg` works.
+Every component is CI-built from pinned public sources; this file documents
+how each build is provisioned. `packaging/aur/reproduce.sh` runs the same
+clone→apply→build path locally. The hwcomposer prerequisites below are
+assembled automatically by `build/hwcomposer/provision.sh` from
+`packaging/ci/hwc-pins.env` — the manual `$WNV` description is kept as
+reference for what the script provides.
 
 ## Status per component
 
