@@ -1,6 +1,0 @@
-upstream: https://gitlab.freedesktop.org/virgl/virglrenderer.git
-base-commit: dc35e4d  (meson: use correct type for boolean defaults)
-# Apply: git checkout dc35e4d && git am 0001..0003 && git apply 0004-wip-*.patch
-# Then copy src/virglrenderer-vtest/vtest_gpu_alloc.{c,h} into vtest/ (referenced by
-# the meson.build change in 0004). 0001 sync_file export, 0002 dmabuf-import blob,
-# 0003 listen backlog 128, 0004 WIP: gpu-alloc command + vkr global-priority strip/retry.

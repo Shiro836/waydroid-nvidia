@@ -1,9 +1,0 @@
-#!/usr/bin/env bash
-# wd — run the runtime waydroid checkout as root (container/init/upgrade cmds).
-# Usage: dev/wd container start | dev/wd upgrade -o | dev/wd shell ...
-source "$(dirname "$(readlink -f "$0")")/env.sh"
-cd "$WAYDROID_SRC"
-# interactive tty: normal sudo (may prompt). non-tty (agents/units): -n only —
-# a bare sudo prompt without a tty burns PAM attempts and faillock locks the
-# account for 600s (see STATE.md).
-if [ -t 0 ]; then exec sudo python3 waydroid.py "$@"; else exec sudo -n python3 waydroid.py "$@"; fi

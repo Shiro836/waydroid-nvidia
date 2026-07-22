@@ -1,6 +1,0 @@
-upstream: https://github.com/waydroid/android_hardware_waydroid
-base-commit: 7750307  (hwcomposer: restart touch input on resize)
-# Apply: git checkout 7750307 && git apply 0001-wip-nvidia-fixes.patch
-# WIP: single-window blacklist ordering, bufferless-SKIP draw index, refresh override
-# prop, full-ui window creation fixes, gralloc_handler tweaks.
-# Built standalone (no AOSP tree) via build/hwcomposer/build.sh.

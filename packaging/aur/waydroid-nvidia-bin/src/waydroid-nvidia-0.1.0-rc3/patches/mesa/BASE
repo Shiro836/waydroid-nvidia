@@ -1,5 +1,0 @@
-upstream: https://gitlab.freedesktop.org/mesa/mesa.git
-base-commit: a8ce4d8f  (freedreno: add Adreno 225)
-# Apply: git checkout a8ce4d8f && git am 0001-*.patch 0002-*.patch && git apply 0003-wip-*.patch
-# 0001 sync_fd export over vtest, 0002 dma_buf import over vtest,
-# 0003 WIP: AHB memory-type steering + LINEAR-modifier import fixes + UMA mem flags.

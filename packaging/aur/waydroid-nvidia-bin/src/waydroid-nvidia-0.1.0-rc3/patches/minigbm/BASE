@@ -1,5 +1,0 @@
-upstream: https://github.com/waydroid/android_external_minigbm
-base-commit: 16844ba  (gralloc: Handle PixelFormat::R_8)
-# No source-file patch: the whole change is the net-new backend
-# src/minigbm-vtest/vtest_wrapper.c (drop into gbm_mesa_driver/, replaces
-# libgbm_mesa_wrapper.so; allocates via VCMD_RESOURCE_ALLOC_GPU over vtest).

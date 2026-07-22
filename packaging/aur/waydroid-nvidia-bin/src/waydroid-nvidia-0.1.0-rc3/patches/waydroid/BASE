@@ -1,8 +1,0 @@
-upstream: https://github.com/waydroid/waydroid.git
-base-commit: a33a5c0  (Merge #2218 aidl-gralloc5)
-# Apply: git apply 0001-nvidia-integration.patch
-# lxc.py: emit our config_nodes bind-mounts (venus socket, nv/ libs) in the generator
-#         so they survive `waydroid upgrade`. hardware_manager.py: suspend_action=none.
-# gpu.py: explicit drm_device in waydroid.cfg bypasses the nvidia blacklist
-#         (waydroid-nvidia-setup writes the NVIDIA render node there; without it
-#         NVIDIA-only hosts get no /dev/dri node -> SF crash loop, issue #1883).

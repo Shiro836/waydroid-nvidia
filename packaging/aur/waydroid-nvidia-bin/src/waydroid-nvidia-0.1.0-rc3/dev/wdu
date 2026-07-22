@@ -1,6 +1,0 @@
-#!/usr/bin/env bash
-# wdu — run the runtime waydroid checkout as the user (session/UI cmds; needs
-# the Wayland env). Usage: dev/wdu session start | dev/wdu show-full-ui
-source "$(dirname "$(readlink -f "$0")")/env.sh"
-cd "$WAYDROID_SRC"
-exec python3 waydroid.py "$@"

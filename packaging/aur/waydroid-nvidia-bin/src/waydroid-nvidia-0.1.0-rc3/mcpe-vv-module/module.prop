@@ -1,6 +1,0 @@
-id=mcpe_vv
-name=Minecraft Vibrant Visuals Unlock
-version=v1.0
-versionCode=1
-author=waydroid-nvidia
-description=Detects the GPU at boot and patches Minecraft Bedrock's tiers.bin in place so Vibrant Visuals is selectable on any device (incl. Waydroid/Venus, emulators, unsupported phones). Re-applies automatically after Minecraft updates. No re-sign, no reinstall.

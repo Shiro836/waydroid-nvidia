@@ -1,7 +1,0 @@
-target_os = "android"
-target_cpu = "x64"
-is_debug = false
-is_component_build = false
-angle_libs_suffix = "_angle"
-android64_ndk_api_level = 30
-angle_enable_swiftshader = false
