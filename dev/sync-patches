@@ -30,9 +30,10 @@ cp "$VIRGL_TREE/vtest/vtest_gpu_alloc.h" "$REPO/src/virglrenderer-vtest/"
 say "hwcomposer: 0001-wip-nvidia-fixes (all uncommitted)"
 diffto "$HWC_TREE" "$REPO/patches/hwcomposer/0001-wip-nvidia-fixes.patch"
 
-say "waydroid: 0001-nvidia-integration (uncommitted gpu.py + lxc.py + hardware_manager.py)"
+say "waydroid: 0001-nvidia-integration (uncommitted gpu.py + lxc.py + hardware_manager.py + session_manager.py)"
 diffto "$WAYDROID_SRC" "$REPO/patches/waydroid/0001-nvidia-integration.patch" \
-    tools/helpers/gpu.py tools/helpers/lxc.py tools/services/hardware_manager.py
+    tools/helpers/gpu.py tools/helpers/lxc.py tools/services/hardware_manager.py \
+    tools/actions/session_manager.py
 
 echo
 say "review (nothing committed):"

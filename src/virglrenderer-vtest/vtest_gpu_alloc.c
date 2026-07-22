@@ -444,8 +444,18 @@ vtest_gpu_alloc_cpu(uint32_t width, uint32_t height, uint32_t drm_format,
 
    int ufd = open("/dev/udmabuf", O_RDWR | O_CLOEXEC);
    if (ufd < 0) {
+      int err = errno;
+      /* every CPU-mappable gralloc buffer comes through here — a permission
+       * error means the udev rule is missing and the whole guest CPU-buffer
+       * path is dead. Say so, loudly and exactly. */
+      if (err == EACCES || err == EPERM)
+         fprintf(stderr,
+                 "vtest_gpu_alloc: cannot open /dev/udmabuf (%s). Install "
+                 "70-waydroid-nvidia.rules (udev uaccess) and re-login, or "
+                 "grant this user access to /dev/udmabuf.\n",
+                 strerror(err));
       close(memfd);
-      return -errno;
+      return -err;
    }
    struct udmabuf_create create = {
       .memfd = (uint32_t)memfd,

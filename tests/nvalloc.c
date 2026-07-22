@@ -108,13 +108,21 @@ int main(int argc, char **argv) {
     EGLDeviceEXT devs[16]; EGLint ndev = 0;
     qdevs(16, devs, &ndev);
     EGLDisplay dpy = EGL_NO_DISPLAY;
+    /* select by VENDOR, never by node path — hosts differ (hybrid iGPU+dGPU
+     * boxes, single-GPU rentals). WDNV_RENDER_NODE pins a node explicitly. */
+    const char *want_node = getenv("WDNV_RENDER_NODE");
     for (int i = 0; i < ndev; i++) {
-        const char *node = qdevstr(devs[i], EGL_DRM_RENDER_NODE_FILE_EXT);
-        if (!node || strcmp(node, "/dev/dri/renderD128")) continue;
+        if (want_node) {
+            const char *node = qdevstr(devs[i], EGL_DRM_RENDER_NODE_FILE_EXT);
+            if (!node || strcmp(node, want_node)) continue;
+        }
         EGLDisplay d = eglGetPlatformDisplay(EGL_PLATFORM_DEVICE_EXT, devs[i], NULL);
-        if (d != EGL_NO_DISPLAY && eglInitialize(d, NULL, NULL)) { dpy = d; break; }
+        if (d == EGL_NO_DISPLAY || !eglInitialize(d, NULL, NULL)) continue;
+        const char *vendor = eglQueryString(d, EGL_VENDOR);
+        if (vendor && strstr(vendor, "NVIDIA")) { dpy = d; break; }
+        eglTerminate(d);
     }
-    if (dpy == EGL_NO_DISPLAY) { fprintf(stderr, "no NVIDIA EGL\n"); return 1; }
+    if (dpy == EGL_NO_DISPLAY) { fprintf(stderr, "no NVIDIA EGL device found\n"); return 1; }
     eglBindAPI(EGL_OPENGL_ES_API);
     static const EGLint ctx_attr[] = {EGL_CONTEXT_CLIENT_VERSION, 2, EGL_NONE};
     EGLContext ctx = eglCreateContext(dpy, NULL, EGL_NO_CONTEXT, ctx_attr);

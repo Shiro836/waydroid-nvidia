@@ -1529,10 +1529,10 @@ index fc5ff2c..d5c1150 100644
  
  struct vn_renderer_shmem_ops {
 diff --git a/src/virtio/vulkan/vn_renderer_vtest.c b/src/virtio/vulkan/vn_renderer_vtest.c
-index 7aaebd2..bfc7184 100644
+index 7aaebd2..7d47597 100644
 --- a/src/virtio/vulkan/vn_renderer_vtest.c
 +++ b/src/virtio/vulkan/vn_renderer_vtest.c
-@@ -10,12 +10,15 @@
+@@ -10,12 +10,16 @@
  #include <errno.h>
  #include <netinet/in.h>
  #include <poll.h>
@@ -1545,10 +1545,11 @@ index 7aaebd2..bfc7184 100644
  #include <unistd.h>
  
 +#include "drm-uapi/drm.h"
++#include "util/log.h"
  #include "drm-uapi/virtgpu_drm.h"
  #include "util/os_file.h"
  #include "util/os_misc.h"
-@@ -44,6 +47,11 @@ struct vtest_bo {
+@@ -44,6 +48,11 @@ struct vtest_bo {
  
  struct vtest_sync {
     struct vn_renderer_sync base;
@@ -1560,7 +1561,7 @@ index 7aaebd2..bfc7184 100644
  };
  
  struct vtest {
-@@ -57,6 +65,19 @@ struct vtest {
+@@ -57,6 +66,19 @@ struct vtest {
     uint32_t protocol_version;
     uint32_t max_timeline_count;
     bool has_venus_sync_fd;
@@ -1580,7 +1581,30 @@ index 7aaebd2..bfc7184 100644
  
     struct {
        uint32_t id;
-@@ -532,6 +553,39 @@ vtest_vcmd_resource_import_blob(struct vtest *vtest, uint64_t size, int fd)
+@@ -80,7 +102,10 @@ vtest_connect_socket(struct vn_instance *instance, const char *path)
+ 
+    sock = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    if (sock < 0) {
+-      vn_log(instance, "failed to create a socket");
++      /* NVWD: mesa_loge, not vn_log — vn_log is debug-level and hidden on
++       * Android, and this failure is the root cause behind every downstream
++       * EGL/SurfaceFlinger error. It must reach logcat unconditionally. */
++      mesa_loge("NVWD: venus vtest: failed to create a socket");
+       return -1;
+    }
+ 
+@@ -89,7 +114,9 @@ vtest_connect_socket(struct vn_instance *instance, const char *path)
+    memcpy(un.sun_path, path, strlen(path));
+ 
+    if (connect(sock, (struct sockaddr *)&un, sizeof(un)) == -1) {
+-      vn_log(instance, "failed to connect to %s: %s", path, strerror(errno));
++      mesa_loge("NVWD: venus vtest: failed to connect to %s: %s — is the "
++                "host render server (wd-venus) running?",
++                path, strerror(errno));
+       close(sock);
+       return -1;
+    }
+@@ -532,6 +559,39 @@ vtest_vcmd_resource_import_blob(struct vtest *vtest, uint64_t size, int fd)
     return res_id;
  }
  
@@ -1620,7 +1644,7 @@ index 7aaebd2..bfc7184 100644
  static int
  vtest_vcmd_sync_export_sync_file(struct vtest *vtest,
                                   uint32_t sync_id,
-@@ -581,11 +635,31 @@ vtest_vcmd_submit_cmd2(struct vtest *vtest,
+@@ -581,11 +641,31 @@ vtest_vcmd_submit_cmd2(struct vtest *vtest,
     if (!total_size)
        return;
  
@@ -1654,7 +1678,7 @@ index 7aaebd2..bfc7184 100644
     /* write batch count and batch headers */
     const uint32_t batch_count = 1;
     size_t sync_offset = header_size + batch->cs_size;
-@@ -658,6 +732,59 @@ vtest_sync_reset(struct vn_renderer *renderer,
+@@ -658,6 +738,59 @@ vtest_sync_reset(struct vn_renderer *renderer,
     return vtest_sync_write(renderer, sync, initial_val);
  }
  
@@ -1714,7 +1738,7 @@ index 7aaebd2..bfc7184 100644
  static int
  vtest_sync_export_syncobj(struct vn_renderer *renderer,
                            struct vn_renderer_sync *_sync,
-@@ -670,6 +797,14 @@ vtest_sync_export_syncobj(struct vn_renderer *renderer,
+@@ -670,6 +803,14 @@ vtest_sync_export_syncobj(struct vn_renderer *renderer,
     if (!sync_file || !vtest->has_venus_sync_fd)
        return -ENOTSUP;
  
@@ -1729,7 +1753,7 @@ index 7aaebd2..bfc7184 100644
     /* Resolve the (binary) sync's signal point to the pending submit's
      * VkFence on the server and export a sync_file from it.  -1 means the
      * point already retired (already-signaled sync_file convention).
-@@ -1032,6 +1167,44 @@ vtest_submit(struct vn_renderer *renderer,
+@@ -1032,6 +1173,44 @@ vtest_submit(struct vn_renderer *renderer,
     return VK_SUCCESS;
  }
  
@@ -1774,7 +1798,7 @@ index 7aaebd2..bfc7184 100644
  static void
  vtest_init_renderer_info(struct vtest *vtest)
  {
-@@ -1042,6 +1215,7 @@ vtest_init_renderer_info(struct vtest *vtest)
+@@ -1042,6 +1221,7 @@ vtest_init_renderer_info(struct vtest *vtest)
  
     info->has_dma_buf_import = vtest->has_venus_sync_fd;
     info->has_external_sync = vtest->has_venus_sync_fd;
@@ -1782,7 +1806,7 @@ index 7aaebd2..bfc7184 100644
     info->has_implicit_fencing = false;
  
     const struct virgl_renderer_capset_venus *capset = &vtest->capset.data;
-@@ -1078,6 +1252,12 @@ vtest_destroy(struct vn_renderer *renderer,
+@@ -1078,6 +1258,12 @@ vtest_destroy(struct vn_renderer *renderer,
        close(vtest->sock_fd);
     }
  
@@ -1795,7 +1819,7 @@ index 7aaebd2..bfc7184 100644
     mtx_destroy(&vtest->sock_mutex);
     util_sparse_array_finish(&vtest->shmem_array);
     util_sparse_array_finish(&vtest->bo_array);
-@@ -1172,11 +1352,39 @@ vtest_init(struct vtest *vtest)
+@@ -1172,11 +1358,39 @@ vtest_init(struct vtest *vtest)
  
     vtest_vcmd_context_init(vtest, vtest->capset.id);
  
