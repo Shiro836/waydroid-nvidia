@@ -205,37 +205,37 @@ jobs:
           if-no-files-found: error
 
   angle:
-    name: guest ANGLE (tags only, ~2h)
+    name: guest ANGLE (self-hosted, persistent checkout)
     if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, lineage]
     steps:
       - uses: actions/checkout@v4
       - name: Load pins
         run: cat packaging/ci/pins.env | grep -v '^#' >> "$GITHUB_ENV"
-      - name: Work area on /mnt (the 16 GB sync does not fit on /)
-        run: sudo mkdir -p /mnt/angle && sudo chown "$USER" /mnt/angle
-      - name: Fetch ANGLE at pinned commit
-        working-directory: /mnt/angle
+      - name: Sync ANGLE at pinned commit (persistent work area)
         run: |
-          git clone -q https://chromium.googlesource.com/chromium/tools/depot_tools.git
-          export PATH="/mnt/angle/depot_tools:$PATH"
-          git init -q angle
-          git -C angle fetch -q "$ANGLE_UPSTREAM" "$ANGLE_SHA"
-          git -C angle checkout -q FETCH_HEAD
-          cd angle
-          python3 scripts/bootstrap.py
-          # bootstrap.py writes .gclient in the angle dir and may already
-          # define target_os — replace it there, append only if absent
+          W="$HOME/angle-ci"
+          mkdir -p "$W"
+          [ -d "$W/depot_tools" ] || git clone -q https://chromium.googlesource.com/chromium/tools/depot_tools.git "$W/depot_tools"
+          export PATH="$W/depot_tools:$PATH"
+          if [ ! -d "$W/angle/.git" ]; then
+            git init -q "$W/angle"
+          fi
+          git -C "$W/angle" fetch -q "$ANGLE_UPSTREAM" "$ANGLE_SHA"
+          git -C "$W/angle" checkout -q FETCH_HEAD
+          cd "$W/angle"
+          [ -f .gclient ] || python3 scripts/bootstrap.py
           if grep -q '^target_os' .gclient 2>/dev/null; then
             sed -i "s/^target_os = .*/target_os = ['android']/" .gclient
           else
             echo "target_os = ['android']" >> .gclient
           fi
-          gclient sync --no-history -j8
+          gclient sync --no-history -j16
       - name: Build the three ANGLE libraries
-        working-directory: /mnt/angle/angle
         run: |
-          export PATH="/mnt/angle/depot_tools:$PATH"
+          W="$HOME/angle-ci"
+          export PATH="$W/depot_tools:$PATH"
+          cd "$W/angle"
           mkdir -p out/AndroidX64
           cp "$GITHUB_WORKSPACE/build/angle/args.gn" out/AndroidX64/args.gn
           buildtools/linux64/gn gen out/AndroidX64
