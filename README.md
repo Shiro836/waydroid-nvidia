@@ -69,6 +69,27 @@ sudo waydroid shell dumpsys SurfaceFlinger | grep GLES
 # GLES: ... ANGLE (NVIDIA, Vulkan ... Venus (NVIDIA GeForce ...))
 ```
 
+**If your compositor is not on the NVIDIA GPU** (monitors connected to
+another GPU, iGPU-driven laptop panel): the compositor can't display this
+stack's NVIDIA buffers and the Waydroid window dies instantly. The workaround
+is running Waydroid nested inside gamescope pinned to the NVIDIA GPU, so
+compositing happens on NVIDIA and gamescope hands your desktop something it
+can display. Needs `gamescope` and `wayland-utils`:
+
+```sh
+waydroid session stop; sleep 5
+W=$(wayland-info | grep -B1 'flags: current' | grep -oP 'width:\s*\K\d+' | head -1)
+H=$(wayland-info | grep -B1 'flags: current' | grep -oP 'height:\s*\K\d+' | head -1)
+GPU=$(lspci -nn | grep -Ei 'vga|3d' | grep -i nvidia | grep -oP '\[\K10de:[0-9a-f]{4}' | head -1)
+gamescope -f -W "$W" -H "$H" --prefer-vk-device "$GPU" -- \
+  sh -c 'WAYLAND_DISPLAY=$GAMESCOPE_WAYLAND_DISPLAY exec waydroid show-full-ui'
+```
+
+Launch apps from inside Android while nested (`waydroid app launch` swaps the
+window and crashes gamescope). **Broken on hybrid Intel+NVIDIA laptops right
+now** — gamescope crashes and takes the host session down with it
+(issue #2, upstream gamescope#1590); hybrid support is being worked on there.
+
 **NixOS:** community flake —
 [yigexuanmu/waydroid-nvidia-nix](https://github.com/yigexuanmu/waydroid-nvidia-nix).
 **Other distros:** the same binaries install anywhere — see
