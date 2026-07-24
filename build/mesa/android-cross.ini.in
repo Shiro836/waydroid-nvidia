@@ -1,0 +1,19 @@
+; Meson cross-file template for the Android guest Venus driver.
+; build/mesa/build.sh renders this into the ABI-specific build directory.
+[binaries]
+ar = '@NDK_BIN@/llvm-ar'
+c = ['@NDK_BIN@/@NDK_TARGET@-clang']
+cpp = ['@NDK_BIN@/@NDK_TARGET@-clang++', '-fno-exceptions', '-fno-unwind-tables', '-fno-asynchronous-unwind-tables', '--start-no-unused-arguments', '-static-libstdc++', '--end-no-unused-arguments']
+c_ld = 'lld'
+cpp_ld = 'lld'
+strip = '@NDK_BIN@/llvm-strip'
+pkg-config = ['env', 'PKG_CONFIG_PATH=', 'PKG_CONFIG_LIBDIR=@NDK_PKGCONFIG@', '/usr/bin/pkg-config']
+
+[host_machine]
+system = 'android'
+cpu_family = '@CPU_FAMILY@'
+cpu = '@CPU@'
+endian = 'little'
+
+[properties]
+needs_exe_wrapper = true

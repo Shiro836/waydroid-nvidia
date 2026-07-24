@@ -41,8 +41,10 @@ clone → apply → build path locally.
 1. **Host renderer** — virglrenderer at `patches/virglrenderer/BASE`, apply
    series, copy `src/virglrenderer-vtest/*` into `vtest/`, `meson` + `ninja`
    (`build/virglrenderer/build.sh`). Runs as the `wd-venus` systemd user unit.
-2. **Guest Mesa Venus** — mesa at `patches/mesa/BASE`, apply, NDK cross-build
-   for android-x86_64 (`build/mesa/build.sh`).
+2. **Guest Mesa Venus** — mesa at `patches/mesa/BASE`, apply, then NDK
+   cross-build both `ANDROID_ABI=x86_64` and `ANDROID_ABI=x86`
+   (`build/mesa/build.sh`). The latter uses the NDK's
+   `i686-linux-android34-clang` target.
 3. **gralloc backend** — `src/minigbm-vtest/vtest_wrapper.c` against pinned
    minigbm (`build/gralloc/build.sh`); deploys as the `libgbm_mesa_wrapper`
    replacement.
@@ -54,8 +56,9 @@ clone → apply → build path locally.
    debugfs — no mounts, no root). Then `build/hwcomposer/build.sh` compiles
    and links with the NDK. Pins: `packaging/ci/hwc-pins.env`.
 5. **ANGLE** — pinned commit (`ANGLE_SHA` in `packaging/ci/pins.env`),
-   `gclient` checkout, `build/angle/args.gn`, ninja. Heavy (~16 GB checkout);
-   CI runs it on a self-hosted runner with a persistent work area.
+   `gclient` checkout, `build/angle/args-x86{,_64}.gn`, ninja. CI builds
+   `out/AndroidX86` and `out/AndroidX64`; the checkout is heavy (~16 GB), so
+   it runs on a self-hosted runner with a persistent work area.
 6. **surfaceflinger** — built from a LineageOS 20 tree
    (`build/lineage-20/build.sh sf`); CI runs it on the self-hosted runner
    that carries the ~150 GB synced tree. Note: AOSP's `envsetup.sh` is not
@@ -77,3 +80,20 @@ clone → apply → build path locally.
 - Please don't use CI as a remote grep/build service — every recipe runs
   locally (see `reproduce.sh`), and hermetic validation in a container
   before pushing is the house style.
+
+Build the two app-facing Vulkan HALs locally with:
+
+```sh
+ANDROID_ABI=x86_64 build/mesa/build.sh /path/to/mesa /path/to/mesa/build-android-x86_64
+ANDROID_ABI=x86    build/mesa/build.sh /path/to/mesa /path/to/mesa/build-android-x86
+```
+
+The default pkg-config search is intentionally empty so Meson uses its pinned
+fallbacks. Set `NDK_PKGCONFIG` only to a directory containing libraries built
+for the selected Android ABI; the old x86_64-only local tree is invalid for an
+`ANDROID_ABI=x86` build.
+
+Release staging preserves their Android paths as
+`vendor/lib64/hw/vulkan.virtio.so` and
+`vendor/lib/hw/vulkan.virtio.so`; flattening these artifacts would overwrite
+one ABI with the other.

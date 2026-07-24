@@ -57,6 +57,15 @@ All end up on NVIDIA via Venus:
 - `ro.hardware.vulkan=virtio` selects Venus; `mesa.vn.debug=vtest` +
   `mesa.vtest.socket.name=/dev/venus.sock` select the socket transport.
 
+App-facing ANGLE and Venus are installed for both Android ABIs:
+`vendor/lib` contains ELF32/`EM_386`, while `vendor/lib64` contains
+ELF64/`EM_X86_64`. An ARM32-only app therefore follows
+`ARM32 -> Houdini -> x86 ANGLE -> x86 Venus -> vtest`. The socket protocol is
+architecture-neutral and the host renderer remains a single 64-bit process;
+host `lib32-nvidia-utils` is not part of this path. Gralloc, hwcomposer and
+SurfaceFlinger also remain 64-bit because they are system services rather
+than libraries loaded into an app process.
+
 ## Display: native high refresh
 
 The guest display runs at the monitor's real refresh rate (tested at 500 Hz):

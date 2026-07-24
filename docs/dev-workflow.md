@@ -42,6 +42,12 @@ than broad sudo rules, install the validating helper and allow only it:
 sudo install -Dm755 packaging/host/wd-deploy /usr/local/sbin/wd-deploy
 ```
 
+Before the first `dev/deploy` of a guest library, install the current patched
+Waydroid package and run `sudo waydroid-nvidia-setup` once. That selects
+`nvidia_guest_layout=2` and regenerates `config_nodes` with the path-preserving
+`vendor/lib` and `vendor/lib64` mounts. The helper checks both settings and
+rejects a deploy that would otherwise write to an inactive path.
+
 sudoers pattern (via `visudo -f /etc/sudoers.d/waydroid-dev`):
 
 ```
@@ -120,8 +126,13 @@ Guest test binaries (host-side probes live in `tests/`):
 ```sh
 $NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/x86_64-linux-android34-clang \
   -O1 -o out-android test.c -lEGL -lGLESv2 -landroid -llog
+$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/i686-linux-android34-clang \
+  -O1 -o out-android32 test.c -lEGL -lGLESv2 -landroid -llog
 # deliver via: cp out-android ~/.local/share/waydroid/data/local/tmp/  (= guest /data/local/tmp)
 ```
+
+`dev/build mesa` and `dev/build angle` build both ABIs. Append `-x86` or
+`-x86_64` to build or deploy just one, for example `dev/deploy mesa-x86`.
 
 Grow the guest log buffer per boot (`persist.logd.size` does not stick):
 `sudo waydroid shell -- logcat -G 16M`.

@@ -15,6 +15,11 @@ runner host).
    Debug any red job locally/hermetically first (container with CI parity);
    don't iterate by pushing.
 
+   Confirm the Mesa matrix produced both `guest-vulkan-virtio-x86` and
+   `guest-vulkan-virtio-x86_64`, and inspect the assembled archives before
+   tagging. The guest tree must contain separate `vendor/lib` and
+   `vendor/lib64` Vulkan/ANGLE files; no app-facing `.so` may be flat.
+
 2. **Tag & push** — the release job rebuilds at the tag, assembles all four
    tarballs (host, guest, guest-prebuilts, SHA256SUMS), attaches SLSA
    attestations to every asset, and publishes. `-rcN` tags become

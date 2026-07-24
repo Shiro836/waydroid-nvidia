@@ -14,6 +14,8 @@ sudo waydroid shell dumpsys SurfaceFlinger | grep GLES
 # healthy: GLES: ... ANGLE (NVIDIA, Vulkan ... Venus (NVIDIA GeForce ...))
 sudo waydroid shell getprop ro.hardware.gralloc
 # healthy: minigbm_gbm_mesa
+sudo waydroid shell getprop ro.product.cpu.abilist
+# ARM32 translation needs x86 plus armeabi-v7a in this list
 ```
 
 ## One-command debug capture
@@ -38,6 +40,19 @@ none), then attach it to an issue.
 | Setup refuses: `nvidia-drm.modeset` | modeset=0 disables **all** DMA-BUF support in the driver — nothing in this stack can work | Add `nvidia_drm.modeset=1` to kernel params or modprobe.d, reboot |
 | Cursor invisible / screenshots black, everything else fine | No `/dev/udmabuf` access (CPU-mappable buffer path); wd-venus journal says exactly this | The package's udev rule grants it to the seated user — re-log-in once after install. Headless: `setfacl -m u:USER:rw /dev/udmabuf` |
 | Images in `/etc/waydroid-extra/images` or `/usr/share/waydroid-extra/images` | waydroid silently prefers preinstalled images over downloads | Remove/move them if you want OTA images |
+| ARM32-only app runs on LLVM/Lavapipe while the desktop is accelerated | The 32-bit `vendor/lib/hw/vulkan.virtio.so` is missing or is a renamed `vulkan.lvp.so` | Install a dual-ABI release and re-run `sudo waydroid-nvidia-setup`; it requires ELF32/`EM_386` for every `vendor/lib` payload |
+
+For a translated app, confirm its process maps the 32-bit stack (replace the
+package name if needed):
+
+```sh
+sudo waydroid shell -- sh -c '
+  pid=$(pidof com.tencent.qqmusic | cut -d" " -f1)
+  grep -E "/vendor/lib/(egl|hw)/(libGLESv2_angle|vulkan\.virtio)\.so" /proc/$pid/maps'
+```
+
+While playing audio or animating the UI, `nvidia-smi pmon` should show work in
+the host renderer and logcat should not name `llvmpipe` or `Lavapipe`.
 
 ## Is my GPU/driver combination OK?
 

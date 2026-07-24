@@ -1,5 +1,3 @@
-# Compatibility entry point for the existing CI/dev AndroidX64 build.
-# Keep this in sync with args-x86_64.gn until callers use the explicit file.
 target_os = "android"
 target_cpu = "x64"
 is_debug = false

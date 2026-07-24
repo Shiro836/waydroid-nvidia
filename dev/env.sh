@@ -19,12 +19,17 @@ set -euo pipefail
 : "${WAYDROID_SRC:=$HOME/repos/waydroid}"
 
 : "${MESA_TREE:=$WNV/mesa}"
-: "${MESA_BUILD:=$MESA_TREE/build-android-x86_64}"
+: "${MESA_BUILD_X86_64:=${MESA_BUILD:-$MESA_TREE/build-android-x86_64}}"
+: "${MESA_BUILD_X86:=$MESA_TREE/build-android-x86}"
+# Backward-compatible name used by older local helpers.
+: "${MESA_BUILD:=$MESA_BUILD_X86_64}"
 : "${VIRGL_TREE:=$WNV/virglrenderer}"
 : "${VIRGL_BUILD:=$VIRGL_TREE/build}"
 : "${HWC_TREE:=$WNV/hwcomposer-src}"
 : "${HWC_BUILD:=$WNV/hwc-build}"
 : "${ANGLE_TREE:=$WNV/angle-src}"
+: "${ANGLE_OUT_X86_64:=$ANGLE_TREE/out/AndroidX64}"
+: "${ANGLE_OUT_X86:=$ANGLE_TREE/out/AndroidX86}"
 
 # --- toolchain ---
 : "${NDK:=/opt/android-ndk}"

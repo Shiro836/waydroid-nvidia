@@ -6,6 +6,7 @@ mcpe-vv-module/vvpatch
 mcpe-vv-module/src/vvpatch
 
 # Build outputs
+.work/
 build/hwcomposer/out/
 build/**/out/
 *.o

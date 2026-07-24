@@ -2,23 +2,37 @@
 # deploy — install a freshly built component into the running Waydroid tree via
 # the narrow privileged helper (wd-deploy). Guest .so's need a FULL restart
 # afterwards (dev/restart) — a bind-mounted lib keeps its old inode until then.
-# Usage: dev/deploy <mesa|virgl|hwc|angle|gralloc>
+# Usage: dev/deploy <mesa[-x86|-x86_64]|virgl|hwc|angle[-x86|-x86_64]|gralloc>
 source "$(dirname "$(readlink -f "$0")")/env.sh"
 need_sudo
 
 case "${1:-}" in
-    mesa)
-        sudo -n "$DEPLOY" overlay-vulkan \
-            "$MESA_BUILD/src/virtio/vulkan/libvulkan_virtio.so"
+    mesa) "$0" mesa-x86_64; "$0" mesa-x86 ;;
+    mesa-x86_64)
+        sudo -n "$DEPLOY" guest-lib x86_64 vulkan \
+            "$MESA_BUILD_X86_64/src/virtio/vulkan/libvulkan_virtio.so"
+        warn "guest lib deployed — run dev/restart for the container to pick it up" ;;
+    mesa-x86)
+        sudo -n "$DEPLOY" guest-lib x86 vulkan \
+            "$MESA_BUILD_X86/src/virtio/vulkan/libvulkan_virtio.so"
         warn "guest lib deployed — run dev/restart for the container to pick it up" ;;
     hwc)
-        sudo -n "$DEPLOY" lib \
-            "$HWC_BUILD/out/hwcomposer.waydroid.stripped.so" hwcomposer.waydroid.so
+        sudo -n "$DEPLOY" guest-lib x86_64 hwcomposer \
+            "$HWC_BUILD/out/hwcomposer.waydroid.stripped.so"
         warn "guest lib deployed — run dev/restart" ;;
-    angle)
+    angle) "$0" angle-x86_64; "$0" angle-x86 ;;
+    angle-x86_64)
         for f in EGL GLESv2 GLESv1_CM; do
-            sudo -n "$DEPLOY" lib \
-                "$ANGLE_TREE/out/AndroidX64/lib${f}_angle.so" "lib${f}_angle.so"
+            case "$f" in EGL) kind=egl ;; GLESv1_CM) kind=gles1 ;; GLESv2) kind=gles2 ;; esac
+            sudo -n "$DEPLOY" guest-lib x86_64 "$kind" \
+                "$ANGLE_OUT_X86_64/lib${f}_angle.so"
+        done
+        warn "guest libs deployed — run dev/restart" ;;
+    angle-x86)
+        for f in EGL GLESv2 GLESv1_CM; do
+            case "$f" in EGL) kind=egl ;; GLESv1_CM) kind=gles1 ;; GLESv2) kind=gles2 ;; esac
+            sudo -n "$DEPLOY" guest-lib x86 "$kind" \
+                "$ANGLE_OUT_X86/lib${f}_angle.so"
         done
         warn "guest libs deployed — run dev/restart" ;;
     virgl)
@@ -27,8 +41,8 @@ case "${1:-}" in
         systemctl --user restart "$VENUS_UNIT"
         warn "renderer restarted — run dev/restart so the stack reconnects" ;;
     gralloc)
-        sudo -n "$DEPLOY" lib \
-            "$HWC_BUILD/out/libgbm_mesa_wrapper.so" libgbm_mesa_wrapper.so
+        sudo -n "$DEPLOY" guest-lib x86_64 gralloc \
+            "$HWC_BUILD/out/libgbm_mesa_wrapper.so"
         warn "guest lib deployed — run dev/restart" ;;
-    *) die "usage: dev/deploy <mesa|virgl|hwc|angle|gralloc>" ;;
+    *) die "usage: dev/deploy <mesa[-x86|-x86_64]|virgl|hwc|angle[-x86|-x86_64]|gralloc>" ;;
 esac
