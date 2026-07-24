@@ -26,6 +26,11 @@ tests/nvmmap
 tests/nvmods
 tests/vnprobe
 
+# makepkg litter in the AUR dir (downloaded sources + built packages);
+# only PKGBUILD/.SRCINFO/local install sources are tracked
+packaging/aur/waydroid-nvidia-bin/*.tar.gz
+packaging/aur/waydroid-nvidia-bin/*.tar.zst
+
 # Editor / OS
 .vscode/
 .idea/
