@@ -250,12 +250,19 @@ vtest_alloc(struct alloc_args *args)
    return -ENODEV;
 
 have_resp:;
+   if (resp[0] < VCMD_RESOURCE_ALLOC_GPU_RESP_SIZE) {
+      pthread_mutex_unlock(&dev->mutex);
+      LOGE("alloc: host payload too short (%u < %u)", resp[0],
+           VCMD_RESOURCE_ALLOC_GPU_RESP_SIZE);
+      return -EIO;
+   }
    const uint32_t *d = &resp[VTEST_HDR_SIZE];
    const uint32_t status = d[0];
    if (status) {
       pthread_mutex_unlock(&dev->mutex);
-      LOGE("alloc %ux%u fmt=0x%08x flags=%u failed: host status %u", args->width,
-           args->height, args->drm_format, flags, status);
+      LOGE("alloc %ux%u fmt=%s(0x%08x) flags=%u failed: host status %u", args->width,
+           args->height, vtest_format_name(args->drm_format), args->drm_format,
+           flags, status);
       return -(int)status;
    }
 

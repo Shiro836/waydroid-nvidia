@@ -48,4 +48,23 @@ vtest_is_supported_drm_format(uint32_t drm_format)
    }
 }
 
+static inline const char *
+vtest_format_name(uint32_t drm_format)
+{
+   switch (drm_format) {
+   case VTEST_FORMAT_R8:            return "R8";
+   case VTEST_FORMAT_RGB565:        return "RGB565";
+   case VTEST_FORMAT_XRGB8888:      return "XRGB8888";
+   case VTEST_FORMAT_ARGB8888:      return "ARGB8888";
+   case VTEST_FORMAT_XBGR8888:      return "XBGR8888";
+   case VTEST_FORMAT_ABGR8888:      return "ABGR8888";
+   case VTEST_FORMAT_ABGR2101010:   return "ABGR2101010";
+   case VTEST_FORMAT_XBGR2101010:   return "XBGR2101010";
+   case VTEST_FORMAT_ABGR16161616F: return "ABGR16161616F";
+   case VTEST_FORMAT_NV12:          return "NV12";
+   case VTEST_FORMAT_P010:          return "P010";
+   default:                         return "UNKNOWN";
+   }
+}
+
 #endif /* VTEST_ALLOC_FORMATS_H */

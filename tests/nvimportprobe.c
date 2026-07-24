@@ -56,7 +56,7 @@ static const char *rstr(VkResult r) {
         return "INVALID_DRM_MODIFIER_LAYOUT";
     case VK_ERROR_INITIALIZATION_FAILED: return "INITIALIZATION_FAILED";
     default: {
-        static char buf[32];
+        static __thread char buf[32];
         snprintf(buf, sizeof(buf), "VkResult(%d)", r);
         return buf;
     }}
@@ -90,6 +90,7 @@ int main(void) {
     IPROC(inst, vkGetPhysicalDeviceFormatProperties2);
     IPROC(inst, vkGetPhysicalDeviceImageFormatProperties2);
     IPROC(inst, vkGetPhysicalDeviceQueueFamilyProperties);
+    (void)vkGetPhysicalDeviceQueueFamilyProperties;
     IPROC(inst, vkCreateDevice);
     gdpa = (PFN_vkGetDeviceProcAddr)gipa(inst, "vkGetDeviceProcAddr");
 

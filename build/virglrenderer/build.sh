@@ -13,6 +13,7 @@ BUILDDIR="${2:-$SRCDIR/build}"
 REPO="${REPO:-$(cd "$(dirname "$0")/../.." && pwd)}"
 
 echo "virgl/build.sh: install net-new vtest allocator source"
+mkdir -p "$SRCDIR/vtest/"
 install -m 0644 "$REPO/src/virglrenderer-vtest/vtest_gpu_alloc.c" "$SRCDIR/vtest/"
 install -m 0644 "$REPO/src/virglrenderer-vtest/vtest_gpu_alloc.h" "$SRCDIR/vtest/"
 install -m 0644 "$REPO/src/vtest_alloc_formats.h" "$SRCDIR/vtest/"
