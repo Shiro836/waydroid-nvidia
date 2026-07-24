@@ -33,7 +33,10 @@
 #define ALLOC_DRM_FORMAT_XBGR8888      DRM_FOURCC('X', 'B', '2', '4')
 #define ALLOC_DRM_FORMAT_ABGR8888      DRM_FOURCC('A', 'B', '2', '4')
 #define ALLOC_DRM_FORMAT_ABGR2101010   DRM_FOURCC('A', 'B', '3', '0')
+#define ALLOC_DRM_FORMAT_XBGR2101010   DRM_FOURCC('X', 'B', '3', '0')
 #define ALLOC_DRM_FORMAT_ABGR16161616F DRM_FOURCC('A', 'B', '4', 'H')
+#define ALLOC_DRM_FORMAT_NV12          DRM_FOURCC('N', 'V', '1', '2')
+#define ALLOC_DRM_FORMAT_P010          DRM_FOURCC('P', '0', '1', '0')
 
 struct alloc_vk {
    void *lib;
@@ -74,9 +77,14 @@ drm_format_to_vk(uint32_t drm_format)
    case ALLOC_DRM_FORMAT_ABGR8888:
       return VK_FORMAT_R8G8B8A8_UNORM;
    case ALLOC_DRM_FORMAT_ABGR2101010:
+   case ALLOC_DRM_FORMAT_XBGR2101010:
       return VK_FORMAT_A2B10G10R10_UNORM_PACK32;
    case ALLOC_DRM_FORMAT_ABGR16161616F:
       return VK_FORMAT_R16G16B16A16_SFLOAT;
+   case ALLOC_DRM_FORMAT_NV12:
+      return VK_FORMAT_G8_B8R8_2PLANE_420_UNORM;
+   case ALLOC_DRM_FORMAT_P010:
+      return VK_FORMAT_G10X6_B10X6R10X6_2PLANE_420_UNORM_3PACK16;
    default:
       return VK_FORMAT_UNDEFINED;
    }
@@ -87,8 +95,10 @@ drm_format_bpp(uint32_t drm_format)
 {
    switch (drm_format) {
    case ALLOC_DRM_FORMAT_R8:
+   case ALLOC_DRM_FORMAT_NV12:
       return 1;
    case ALLOC_DRM_FORMAT_RGB565:
+   case ALLOC_DRM_FORMAT_P010:
       return 2;
    case ALLOC_DRM_FORMAT_ABGR16161616F:
       return 8;

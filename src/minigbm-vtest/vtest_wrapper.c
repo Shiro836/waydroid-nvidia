@@ -53,7 +53,10 @@
 #define FMT_XBGR8888      FOURCC('X', 'B', '2', '4')
 #define FMT_ABGR8888      FOURCC('A', 'B', '2', '4')
 #define FMT_ABGR2101010   FOURCC('A', 'B', '3', '0')
+#define FMT_XBGR2101010   FOURCC('X', 'B', '3', '0')
 #define FMT_ABGR16161616F FOURCC('A', 'B', '4', 'H')
+#define FMT_NV12          FOURCC('N', 'V', '1', '2')
+#define FMT_P010          FOURCC('P', '0', '1', '0')
 
 struct vtest_dev {
    pthread_mutex_t mutex;
@@ -172,7 +175,10 @@ vtest_get_gbm_format(uint32_t drm_format)
    case FMT_XBGR8888:
    case FMT_ABGR8888:
    case FMT_ABGR2101010:
+   case FMT_XBGR2101010:
    case FMT_ABGR16161616F:
+   case FMT_NV12:
+   case FMT_P010:
       return drm_format;
    default:
       return 0;

@@ -135,6 +135,13 @@ int main(void) {
     vkGetPhysicalDeviceFormatProperties2(pd, FMT, &fp2);
     printf("modifiers advertised: %u\n", modlist.drmFormatModifierCount);
 
+    IPROC(inst, vkGetPhysicalDeviceFeatures);
+    VkPhysicalDeviceFeatures feats;
+    vkGetPhysicalDeviceFeatures(pd, &feats);
+    printf("host feature textureCompressionETC2: %s (Venus %s compute shader emulation)\n",
+           feats.textureCompressionETC2 ? "YES" : "NO",
+           feats.textureCompressionETC2 ? "unneeded" : "requires");
+
     const char *want_exts[] = {
         "VK_KHR_external_memory_fd", "VK_EXT_external_memory_dma_buf",
         "VK_EXT_image_drm_format_modifier", "VK_KHR_image_format_list",
