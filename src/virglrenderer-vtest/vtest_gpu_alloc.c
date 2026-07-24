@@ -2,6 +2,7 @@
  * server keeps working (minus this command) on hosts without a driver. */
 
 #include "vtest_gpu_alloc.h"
+#include "vtest_alloc_formats.h"
 
 #include <dlfcn.h>
 #include <errno.h>
@@ -13,27 +14,13 @@
 #include <string.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
+#include <time.h>
 #include <unistd.h>
 
 #define VK_NO_PROTOTYPES
 #include <vulkan/vulkan.h>
 
-
-
 #define ALLOC_ALIGN(v, a) (((v) + (a)-1) & ~((uint64_t)(a)-1))
-
-/* DRM fourccs we can allocate as renderable Vulkan images (matches the guest
- * wrapper's get_gbm_format whitelist) */
-#define DRM_FOURCC(a, b, c, d) \
-   ((uint32_t)(a) | ((uint32_t)(b) << 8) | ((uint32_t)(c) << 16) | ((uint32_t)(d) << 24))
-#define ALLOC_DRM_FORMAT_R8            DRM_FOURCC('R', '8', ' ', ' ')
-#define ALLOC_DRM_FORMAT_RGB565        DRM_FOURCC('R', 'G', '1', '6')
-#define ALLOC_DRM_FORMAT_XRGB8888      DRM_FOURCC('X', 'R', '2', '4')
-#define ALLOC_DRM_FORMAT_ARGB8888      DRM_FOURCC('A', 'R', '2', '4')
-#define ALLOC_DRM_FORMAT_XBGR8888      DRM_FOURCC('X', 'B', '2', '4')
-#define ALLOC_DRM_FORMAT_ABGR8888      DRM_FOURCC('A', 'B', '2', '4')
-#define ALLOC_DRM_FORMAT_ABGR2101010   DRM_FOURCC('A', 'B', '3', '0')
-#define ALLOC_DRM_FORMAT_ABGR16161616F DRM_FOURCC('A', 'B', '4', 'H')
 
 struct alloc_vk {
    void *lib;
@@ -58,25 +45,31 @@ struct alloc_vk {
 static struct alloc_vk alloc_vk;
 static pthread_mutex_t alloc_vk_mutex = PTHREAD_MUTEX_INITIALIZER;
 static bool alloc_vk_failed;
+static struct timespec alloc_vk_last_fail;
 
 static VkFormat
 drm_format_to_vk(uint32_t drm_format)
 {
    switch (drm_format) {
-   case ALLOC_DRM_FORMAT_R8:
+   case VTEST_FORMAT_R8:
       return VK_FORMAT_R8_UNORM;
-   case ALLOC_DRM_FORMAT_RGB565:
+   case VTEST_FORMAT_RGB565:
       return VK_FORMAT_R5G6B5_UNORM_PACK16;
-   case ALLOC_DRM_FORMAT_XRGB8888:
-   case ALLOC_DRM_FORMAT_ARGB8888:
+   case VTEST_FORMAT_XRGB8888:
+   case VTEST_FORMAT_ARGB8888:
       return VK_FORMAT_B8G8R8A8_UNORM;
-   case ALLOC_DRM_FORMAT_XBGR8888:
-   case ALLOC_DRM_FORMAT_ABGR8888:
+   case VTEST_FORMAT_XBGR8888:
+   case VTEST_FORMAT_ABGR8888:
       return VK_FORMAT_R8G8B8A8_UNORM;
-   case ALLOC_DRM_FORMAT_ABGR2101010:
+   case VTEST_FORMAT_ABGR2101010:
+   case VTEST_FORMAT_XBGR2101010:
       return VK_FORMAT_A2B10G10R10_UNORM_PACK32;
-   case ALLOC_DRM_FORMAT_ABGR16161616F:
+   case VTEST_FORMAT_ABGR16161616F:
       return VK_FORMAT_R16G16B16A16_SFLOAT;
+   case VTEST_FORMAT_NV12:
+      return VK_FORMAT_G8_B8R8_2PLANE_420_UNORM;
+   case VTEST_FORMAT_P010:
+      return VK_FORMAT_G10X6_B10X6R10X6_2PLANE_420_UNORM_3PACK16;
    default:
       return VK_FORMAT_UNDEFINED;
    }
@@ -86,11 +79,13 @@ static uint32_t
 drm_format_bpp(uint32_t drm_format)
 {
    switch (drm_format) {
-   case ALLOC_DRM_FORMAT_R8:
+   case VTEST_FORMAT_R8:
+   case VTEST_FORMAT_NV12:
       return 1;
-   case ALLOC_DRM_FORMAT_RGB565:
+   case VTEST_FORMAT_RGB565:
+   case VTEST_FORMAT_P010:
       return 2;
-   case ALLOC_DRM_FORMAT_ABGR16161616F:
+   case VTEST_FORMAT_ABGR16161616F:
       return 8;
    default:
       return 4;
@@ -104,23 +99,35 @@ alloc_vk_init_locked(void)
 
    if (vk->device)
       return 0;
-   if (alloc_vk_failed)
-      return -ENODEV;
-   alloc_vk_failed = true; /* cleared on success */
+   if (alloc_vk_failed) {
+      struct timespec now;
+      clock_gettime(CLOCK_MONOTONIC, &now);
+      if (now.tv_sec - alloc_vk_last_fail.tv_sec < 5)
+         return -ENODEV;
+   }
 
    vk->lib = dlopen("libvulkan.so.1", RTLD_NOW | RTLD_LOCAL);
-   if (!vk->lib)
+   if (!vk->lib) {
+      clock_gettime(CLOCK_MONOTONIC, &alloc_vk_last_fail);
+      alloc_vk_failed = true;
       return -ENODEV;
+   }
    *(void **)&vk->get_proc = dlsym(vk->lib, "vkGetInstanceProcAddr");
-   if (!vk->get_proc)
+   if (!vk->get_proc) {
+      clock_gettime(CLOCK_MONOTONIC, &alloc_vk_last_fail);
+      alloc_vk_failed = true;
       return -ENODEV;
+   }
 
 #define GET_GLOBAL(name) PFN_vk##name name = (PFN_vk##name)vk->get_proc(NULL, "vk" #name)
 #define GET_INST(name) PFN_vk##name name = (PFN_vk##name)vk->get_proc(vk->instance, "vk" #name)
 
    GET_GLOBAL(CreateInstance);
-   if (!CreateInstance)
+   if (!CreateInstance) {
+      clock_gettime(CLOCK_MONOTONIC, &alloc_vk_last_fail);
+      alloc_vk_failed = true;
       return -ENODEV;
+   }
 
    const VkApplicationInfo app = {
       .sType = VK_STRUCTURE_TYPE_APPLICATION_INFO,
@@ -131,8 +138,11 @@ alloc_vk_init_locked(void)
       .sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
       .pApplicationInfo = &app,
    };
-   if (CreateInstance(&inst_info, NULL, &vk->instance) != VK_SUCCESS)
+   if (CreateInstance(&inst_info, NULL, &vk->instance) != VK_SUCCESS) {
+      clock_gettime(CLOCK_MONOTONIC, &alloc_vk_last_fail);
+      alloc_vk_failed = true;
       return -ENODEV;
+   }
 
    GET_INST(EnumeratePhysicalDevices);
    GET_INST(GetPhysicalDeviceProperties);
@@ -141,10 +151,25 @@ alloc_vk_init_locked(void)
    GET_INST(CreateDevice);
    GET_INST(GetDeviceProcAddr);
 
-   VkPhysicalDevice devices[16];
-   uint32_t count = 16;
-   if (EnumeratePhysicalDevices(vk->instance, &count, devices) < 0 || !count)
+   uint32_t count = 0;
+   if (EnumeratePhysicalDevices(vk->instance, &count, NULL) < 0 || !count) {
+      clock_gettime(CLOCK_MONOTONIC, &alloc_vk_last_fail);
+      alloc_vk_failed = true;
       return -ENODEV;
+   }
+
+   VkPhysicalDevice *devices = malloc(count * sizeof(*devices));
+   if (!devices) {
+      clock_gettime(CLOCK_MONOTONIC, &alloc_vk_last_fail);
+      alloc_vk_failed = true;
+      return -ENOMEM;
+   }
+   if (EnumeratePhysicalDevices(vk->instance, &count, devices) != VK_SUCCESS) {
+      free(devices);
+      clock_gettime(CLOCK_MONOTONIC, &alloc_vk_last_fail);
+      alloc_vk_failed = true;
+      return -ENODEV;
+   }
 
    /* prefer the device named by VTEST_ALLOC_GPU, else first discrete with
     * dma_buf export */
@@ -156,14 +181,21 @@ alloc_vk_init_locked(void)
       GetPhysicalDeviceProperties(devices[i], &props);
 
       bool has_dma_buf = false, has_modifier = false;
-      VkExtensionProperties exts[512];
-      uint32_t ext_count = 512;
-      EnumerateDeviceExtensionProperties(devices[i], NULL, &ext_count, exts);
-      for (uint32_t j = 0; j < ext_count; j++) {
-         if (!strcmp(exts[j].extensionName, "VK_EXT_external_memory_dma_buf"))
-            has_dma_buf = true;
-         if (!strcmp(exts[j].extensionName, "VK_EXT_image_drm_format_modifier"))
-            has_modifier = true;
+      uint32_t ext_count = 0;
+      EnumerateDeviceExtensionProperties(devices[i], NULL, &ext_count, NULL);
+      if (ext_count > 0) {
+         VkExtensionProperties *exts = malloc(ext_count * sizeof(*exts));
+         if (exts) {
+            if (EnumerateDeviceExtensionProperties(devices[i], NULL, &ext_count, exts) == VK_SUCCESS) {
+               for (uint32_t j = 0; j < ext_count; j++) {
+                  if (!strcmp(exts[j].extensionName, "VK_EXT_external_memory_dma_buf"))
+                     has_dma_buf = true;
+                  if (!strcmp(exts[j].extensionName, "VK_EXT_image_drm_format_modifier"))
+                     has_modifier = true;
+               }
+            }
+            free(exts);
+         }
       }
       if (!has_dma_buf || !has_modifier)
          continue;
@@ -178,8 +210,12 @@ alloc_vk_init_locked(void)
          best = devices[i];
       }
    }
-   if (best == VK_NULL_HANDLE)
+   free(devices);
+   if (best == VK_NULL_HANDLE) {
+      clock_gettime(CLOCK_MONOTONIC, &alloc_vk_last_fail);
+      alloc_vk_failed = true;
       return -ENODEV;
+   }
    vk->physical_device = best;
    GetPhysicalDeviceMemoryProperties(best, &vk->mem_props);
 
@@ -210,6 +246,8 @@ alloc_vk_init_locked(void)
    };
    if (CreateDevice(best, &dev_info, NULL, &vk->device) != VK_SUCCESS) {
       vk->device = VK_NULL_HANDLE;
+      clock_gettime(CLOCK_MONOTONIC, &alloc_vk_last_fail);
+      alloc_vk_failed = true;
       return -ENODEV;
    }
 
@@ -232,8 +270,11 @@ alloc_vk_init_locked(void)
 #undef GET_GLOBAL
 
    if (!vk->GetMemoryFdKHR || !vk->GetPhysicalDeviceFormatProperties2 ||
-       !vk->GetImageDrmFormatModifierPropertiesEXT)
+       !vk->GetImageDrmFormatModifierPropertiesEXT) {
+      clock_gettime(CLOCK_MONOTONIC, &alloc_vk_last_fail);
+      alloc_vk_failed = true;
       return -ENODEV;
+   }
 
    alloc_vk_failed = false;
    return 0;
@@ -259,6 +300,8 @@ vtest_gpu_alloc_image(uint32_t width, uint32_t height, uint32_t drm_format,
 
    VkImage image = VK_NULL_HANDLE;
    VkDeviceMemory memory = VK_NULL_HANDLE;
+   VkDrmFormatModifierPropertiesEXT *props = NULL;
+   uint64_t *mod_candidates = NULL;
    ret = -EINVAL;
 
    /* NVIDIA's EGL treats DRM_FORMAT_MOD_LINEAR dmabufs as external-only
@@ -266,9 +309,11 @@ vtest_gpu_alloc_image(uint32_t width, uint32_t height, uint32_t drm_format,
     * with the driver's real (block-linear) modifiers instead: enumerate
     * what the format supports and let the driver pick.
     */
-   uint64_t mod_candidates[64];
    uint32_t mod_count = 0;
    if (linear) {
+      mod_candidates = malloc(sizeof(*mod_candidates));
+      if (!mod_candidates)
+         goto out;
       /* CPU-mappable: explicit LINEAR so the guest can mmap and compute
        * pixel offsets; NVIDIA dma_bufs mmap fine from any memory type */
       mod_candidates[mod_count++] = 0; /* DRM_FORMAT_MOD_LINEAR */
@@ -282,25 +327,30 @@ vtest_gpu_alloc_image(uint32_t width, uint32_t height, uint32_t drm_format,
       };
       vk->GetPhysicalDeviceFormatProperties2(vk->physical_device, format,
                                              &fmt_props);
-      VkDrmFormatModifierPropertiesEXT props[64];
-      mod_list.drmFormatModifierCount =
-         mod_list.drmFormatModifierCount < 64 ? mod_list.drmFormatModifierCount
-                                              : 64;
-      mod_list.pDrmFormatModifierProperties = props;
-      vk->GetPhysicalDeviceFormatProperties2(vk->physical_device, format,
-                                             &fmt_props);
+      uint32_t mod_count_avail = mod_list.drmFormatModifierCount;
+      if (mod_count_avail > 0) {
+         props = malloc(mod_count_avail * sizeof(*props));
+         mod_candidates = malloc(mod_count_avail * sizeof(*mod_candidates));
+         if (props && mod_candidates) {
+            mod_list.pDrmFormatModifierProperties = props;
+            vk->GetPhysicalDeviceFormatProperties2(vk->physical_device, format,
+                                                   &fmt_props);
 
-      const VkFormatFeatureFlags need = VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT |
-                                        VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT;
-      for (uint32_t i = 0; i < mod_list.drmFormatModifierCount; i++) {
-         /* single-plane, renderable+samplable, not linear */
-         if (props[i].drmFormatModifierPlaneCount == 1 &&
-             (props[i].drmFormatModifierTilingFeatures & need) == need &&
-             props[i].drmFormatModifier != 0)
-            mod_candidates[mod_count++] = props[i].drmFormatModifier;
+            const VkFormatFeatureFlags need = VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT |
+                                              VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT;
+            const uint32_t expected_planes =
+               (drm_format == VTEST_FORMAT_NV12 || drm_format == VTEST_FORMAT_P010) ? 2 : 1;
+
+            for (uint32_t i = 0; i < mod_list.drmFormatModifierCount; i++) {
+               if (props[i].drmFormatModifierPlaneCount == expected_planes &&
+                   (props[i].drmFormatModifierTilingFeatures & need) == need &&
+                   props[i].drmFormatModifier != 0)
+                  mod_candidates[mod_count++] = props[i].drmFormatModifier;
+            }
+         }
       }
    }
-   if (!mod_count)
+   if (!mod_count || !mod_candidates)
       goto out;
 
    const VkExternalMemoryImageCreateInfo ext_info = {
@@ -402,8 +452,8 @@ vtest_gpu_alloc_image(uint32_t width, uint32_t height, uint32_t drm_format,
    ret = 0;
 
 out:
-   /* The exported dma_buf keeps the underlying allocation alive on NVIDIA;
-    * the VkImage/VkDeviceMemory handles themselves are transient. */
+   free(props);
+   free(mod_candidates);
    if (image)
       vk->DestroyImage(vk->device, image, NULL);
    if (memory)
@@ -425,12 +475,21 @@ int
 vtest_gpu_alloc_cpu(uint32_t width, uint32_t height, uint32_t drm_format,
                     uint32_t *out_stride, uint64_t *out_size, int *out_fd)
 {
-   /* experiment control: udmabuf-first (NVIDIA-linear path suspected of
-    * breaking hwcomposer's own SW buffers) */
-{
-   const uint32_t bpp = drm_format_bpp(drm_format);
-   const uint32_t stride = (uint32_t)ALLOC_ALIGN((uint64_t)width * bpp, 256);
-   const uint64_t size = ALLOC_ALIGN((uint64_t)stride * height, 4096);
+   /* CPU-mappable gralloc allocations use /dev/udmabuf over a shrink-sealed memfd. */
+   uint32_t stride = 0;
+   uint64_t size = 0;
+
+   if (drm_format == VTEST_FORMAT_NV12) {
+      stride = (uint32_t)ALLOC_ALIGN((uint64_t)width, 256);
+      size = ALLOC_ALIGN((uint64_t)stride * height * 3 / 2, 4096);
+   } else if (drm_format == VTEST_FORMAT_P010) {
+      stride = (uint32_t)ALLOC_ALIGN((uint64_t)width * 2, 256);
+      size = ALLOC_ALIGN((uint64_t)stride * height * 3 / 2, 4096);
+   } else {
+      const uint32_t bpp = drm_format_bpp(drm_format);
+      stride = (uint32_t)ALLOC_ALIGN((uint64_t)width * bpp, 256);
+      size = ALLOC_ALIGN((uint64_t)stride * height, 4096);
+   }
 
    int memfd = memfd_create("vtest-gralloc", MFD_ALLOW_SEALING | MFD_CLOEXEC);
    if (memfd < 0)
@@ -445,9 +504,6 @@ vtest_gpu_alloc_cpu(uint32_t width, uint32_t height, uint32_t drm_format,
    int ufd = open("/dev/udmabuf", O_RDWR | O_CLOEXEC);
    if (ufd < 0) {
       int err = errno;
-      /* every CPU-mappable gralloc buffer comes through here — a permission
-       * error means the udev rule is missing and the whole guest CPU-buffer
-       * path is dead. Say so, loudly and exactly. */
       if (err == EACCES || err == EPERM)
          fprintf(stderr,
                  "vtest_gpu_alloc: cannot open /dev/udmabuf (%s). Install "
@@ -473,5 +529,4 @@ vtest_gpu_alloc_cpu(uint32_t width, uint32_t height, uint32_t drm_format,
    *out_size = size;
    *out_fd = dmabuf;
    return 0;
-}
 }

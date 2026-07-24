@@ -23,7 +23,7 @@ HDR_DIR="$MINIGBM/gbm_mesa_driver"   # provides gbm_mesa_wrapper.h
 mkdir -p "$OUTDIR"
 echo "gralloc/build.sh: compiling libgbm_mesa_wrapper.so"
 "$CC" -O2 -fPIC -shared -Wall \
-    -I"$HDR_DIR" \
+    -I"$HDR_DIR" -I"$REPO/src" \
     -o "$OUTDIR/libgbm_mesa_wrapper.so" "$SRC" \
     -llog -Wl,-soname,libgbm_mesa_wrapper.so
 echo "  -> $OUTDIR/libgbm_mesa_wrapper.so"
