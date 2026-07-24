@@ -15,6 +15,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <poll.h>
 #include <pthread.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -23,6 +24,7 @@
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/un.h>
 #include <unistd.h>
 
@@ -30,6 +32,7 @@
 #include <sys/system_properties.h>
 
 #include "gbm_mesa_wrapper.h"
+#include "vtest_alloc_formats.h"
 
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
@@ -43,20 +46,6 @@
 #define VCMD_RESOURCE_ALLOC_GPU_RESP_SIZE 7
 
 #define DEFAULT_SOCKET "/dev/venus/venus.sock"
-
-#define FOURCC(a, b, c, d) \
-   ((uint32_t)(a) | ((uint32_t)(b) << 8) | ((uint32_t)(c) << 16) | ((uint32_t)(d) << 24))
-#define FMT_R8            FOURCC('R', '8', ' ', ' ')
-#define FMT_RGB565        FOURCC('R', 'G', '1', '6')
-#define FMT_XRGB8888      FOURCC('X', 'R', '2', '4')
-#define FMT_ARGB8888      FOURCC('A', 'R', '2', '4')
-#define FMT_XBGR8888      FOURCC('X', 'B', '2', '4')
-#define FMT_ABGR8888      FOURCC('A', 'B', '2', '4')
-#define FMT_ABGR2101010   FOURCC('A', 'B', '3', '0')
-#define FMT_XBGR2101010   FOURCC('X', 'B', '3', '0')
-#define FMT_ABGR16161616F FOURCC('A', 'B', '4', 'H')
-#define FMT_NV12          FOURCC('N', 'V', '1', '2')
-#define FMT_P010          FOURCC('P', '0', '1', '0')
 
 struct vtest_dev {
    pthread_mutex_t mutex;
@@ -123,7 +112,8 @@ sock_recv_fd(int sock)
       return -1;
 
    struct cmsghdr *c = CMSG_FIRSTHDR(&msg);
-   if (!c || c->cmsg_level != SOL_SOCKET || c->cmsg_type != SCM_RIGHTS)
+   if (!c || c->cmsg_level != SOL_SOCKET || c->cmsg_type != SCM_RIGHTS ||
+       c->cmsg_len < CMSG_LEN(sizeof(int)))
       return -1;
    int fd;
    memcpy(&fd, CMSG_DATA(c), sizeof(fd));
@@ -141,13 +131,43 @@ vtest_connect(void)
    if (sock < 0)
       return -1;
 
+   /* non-blocking connect + poll(1s) deadline */
+   int orig_flags = fcntl(sock, F_GETFL, 0);
+   if (orig_flags >= 0)
+      fcntl(sock, F_SETFL, orig_flags | O_NONBLOCK);
+
    struct sockaddr_un addr = { .sun_family = AF_UNIX };
    strncpy(addr.sun_path, path, sizeof(addr.sun_path) - 1);
-   if (connect(sock, (struct sockaddr *)&addr, sizeof(addr))) {
+   int res = connect(sock, (struct sockaddr *)&addr, sizeof(addr));
+   if (res < 0 && (errno == EINPROGRESS || errno == EWOULDBLOCK)) {
+      struct pollfd pfd = { .fd = sock, .events = POLLOUT };
+      res = poll(&pfd, 1, 1000); /* 1 sec deadline for connection phase */
+      if (res <= 0) {
+         LOGE("connect(%s): connection deadline timed out", path);
+         close(sock);
+         return -1;
+      }
+      int err = 0;
+      socklen_t len = sizeof(err);
+      if (getsockopt(sock, SOL_SOCKET, SO_ERROR, &err, &len) < 0 || err != 0) {
+         LOGE("connect(%s): %s", path, strerror(err ? err : errno));
+         close(sock);
+         return -1;
+      }
+      res = 0;
+   } else if (res < 0) {
       LOGE("connect(%s): %s", path, strerror(errno));
       close(sock);
       return -1;
    }
+
+   /* restore socket flags and configure 1-second read/write I/O timeouts */
+   if (orig_flags >= 0)
+      fcntl(sock, F_SETFL, orig_flags);
+
+   struct timeval tv = { .tv_sec = 1, .tv_usec = 0 };
+   setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+   setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
 
    /* CREATE_RENDERER; the length field is in bytes (strlen+1) */
    const char name[8] = "gralloc";
@@ -165,24 +185,9 @@ vtest_connect(void)
 static uint32_t
 vtest_get_gbm_format(uint32_t drm_format)
 {
-   switch (drm_format) {
-   /* formats the host allocator can create as renderable NVIDIA images;
-    * everything else takes minigbm's linear R8-blob path */
-   case FMT_R8:
-   case FMT_RGB565:
-   case FMT_XRGB8888:
-   case FMT_ARGB8888:
-   case FMT_XBGR8888:
-   case FMT_ABGR8888:
-   case FMT_ABGR2101010:
-   case FMT_XBGR2101010:
-   case FMT_ABGR16161616F:
-   case FMT_NV12:
-   case FMT_P010:
+   if (vtest_is_supported_drm_format(drm_format))
       return drm_format;
-   default:
-      return 0;
-   }
+   return 0;
 }
 
 static struct gbm_device *
@@ -205,6 +210,7 @@ vtest_dev_destroy(struct gbm_device *gbm)
    struct vtest_dev *dev = (struct vtest_dev *)gbm;
    if (dev->sock >= 0)
       close(dev->sock);
+   pthread_mutex_destroy(&dev->mutex);
    free(dev);
 }
 
@@ -282,13 +288,13 @@ vtest_import(struct gbm_device *gbm, int buf_fd, uint32_t width, uint32_t height
    if (!bo)
       return NULL;
 
-   const off_t size = lseek(buf_fd, 0, SEEK_END);
-   if (size <= 0) {
+   struct stat st;
+   if (fstat(buf_fd, &st) < 0 || st.st_size <= 0) {
       free(bo);
       return NULL;
    }
    bo->fd = fcntl(buf_fd, F_DUPFD_CLOEXEC, 0);
-   bo->size = (uint64_t)size;
+   bo->size = (uint64_t)st.st_size;
    if (bo->fd < 0) {
       free(bo);
       return NULL;
