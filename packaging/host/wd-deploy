@@ -9,8 +9,16 @@ set -euo pipefail
 
 WD=/var/lib/waydroid
 NV=$WD/nv
-USER_NAME=forsen
-USER_HOME=/home/$USER_NAME
+USER_NAME="${SUDO_USER:-}"
+[[ -n "$USER_NAME" && "$USER_NAME" != root ]] || {
+    echo "wd-deploy: invoke through sudo so the calling desktop user is known" >&2
+    exit 1
+}
+USER_HOME=$(getent passwd "$USER_NAME" | cut -d: -f6)
+[[ -n "$USER_HOME" ]] || {
+    echo "wd-deploy: cannot resolve home directory for '$USER_NAME'" >&2
+    exit 1
+}
 DATA=$USER_HOME/.local/share/waydroid
 
 die() { echo "wd-deploy: $*" >&2; exit 1; }
@@ -38,8 +46,69 @@ src_realpath() {
     printf '%s' "$rp"
 }
 
+require_android_elf() {
+    local src="$1" abi="$2" expected_soname="$3"
+    local expected_class expected_machine header dynamic actual_soname
+    case "$abi" in
+      x86) expected_class=ELF32; expected_machine="Intel 80386" ;;
+      x86_64) expected_class=ELF64; expected_machine="Advanced Micro Devices X86-64" ;;
+      *) die "unsupported guest ABI '$abi'" ;;
+    esac
+    command -v readelf >/dev/null 2>&1 || die "readelf is required (install binutils)"
+    header=$(LC_ALL=C readelf -hW -- "$src" 2>/dev/null) ||
+        die "$src is not a complete ELF file"
+    if ! grep -Eq "^[[:space:]]*Class:[[:space:]]+${expected_class}[[:space:]]*$" <<<"$header" ||
+       ! grep -Eq "^[[:space:]]*Machine:[[:space:]]+${expected_machine}[[:space:]]*$" <<<"$header" ||
+       ! grep -Eq '^[[:space:]]*Type:[[:space:]]+DYN([[:space:]]|$)' <<<"$header"; then
+        die "$src is not an $expected_class/$expected_machine shared object"
+    fi
+    dynamic=$(LC_ALL=C readelf -dW -- "$src" 2>/dev/null) ||
+        die "cannot read the dynamic section from $src"
+    actual_soname=$(sed -n 's/.*(SONAME).*Library soname: \[\([^]]*\)\].*/\1/p' <<<"$dynamic")
+    [ "$actual_soname" = "$expected_soname" ] ||
+        die "$src has SONAME '${actual_soname:-<missing>}' (expected '$expected_soname')"
+}
+
 cmd="${1:-}"; shift || true
 case "$cmd" in
+  # Install an app-ABI guest driver into the path-preserving layout. The
+  # kind allowlist prevents a privileged caller from choosing an arbitrary
+  # destination below /var/lib/waydroid.
+  guest-lib)
+    [[ $# -eq 3 ]] || die "usage: guest-lib <x86|x86_64> <vulkan|egl|gles1|gles2|gralloc|hwcomposer> <src>"
+    abi="$1"; kind="$2"; src="$(src_realpath "$3")"
+    case "$abi" in
+      x86) libdir=lib ;;
+      x86_64) libdir=lib64 ;;
+      *) die "unsupported guest ABI '$abi' (want x86 or x86_64)" ;;
+    esac
+    case "$kind" in
+      vulkan) rel="vendor/$libdir/hw/vulkan.virtio.so"; soname=libvulkan_virtio.so ;;
+      egl)    rel="vendor/$libdir/egl/libEGL_angle.so"; soname=libEGL_angle.so ;;
+      gles1)  rel="vendor/$libdir/egl/libGLESv1_CM_angle.so"; soname=libGLESv1_CM_angle.so ;;
+      gles2)  rel="vendor/$libdir/egl/libGLESv2_angle.so"; soname=libGLESv2_angle.so ;;
+      gralloc)
+        [[ "$abi" == x86_64 ]] || die "gralloc is a 64-bit system-service library"
+        rel="vendor/lib64/libgbm_mesa_wrapper.so"
+        soname=libgbm_mesa_wrapper.so
+        ;;
+      hwcomposer)
+        [[ "$abi" == x86_64 ]] || die "hwcomposer is a 64-bit system-service library"
+        rel="vendor/lib64/hw/hwcomposer.waydroid.so"
+        soname=hwcomposer.waydroid.so
+        ;;
+      *) die "unsupported guest library kind '$kind'" ;;
+    esac
+    require_android_elf "$src" "$abi" "$soname"
+    dst="$NV/guest/$rel"
+    grep -Eq '^[[:space:]]*nvidia_guest_layout[[:space:]]*=[[:space:]]*2[[:space:]]*$' \
+        "$WD/waydroid.cfg" ||
+        die "dual-ABI guest layout is not enabled; run the current waydroid-nvidia-setup first"
+    grep -Fq "lxc.mount.entry = $dst $rel " "$WD/lxc/waydroid/config_nodes" ||
+        die "generated container config does not mount $rel from the dual-ABI guest tree; run waydroid upgrade -o"
+    install -o root -g root -m 0644 -D "$src" "$dst"
+    echo "installed $dst"
+    ;;
   # Install a built guest library into /var/lib/waydroid/nv/<name>
   lib)
     [[ $# -eq 2 ]] || die "usage: lib <src> <name>"
@@ -96,6 +165,6 @@ case "$cmd" in
     echo "pulled to $dst"
     ;;
   *)
-    die "unknown subcommand '$cmd' (lib|bin|overlay-vulkan|config-nodes|cfg|push|pull)"
+    die "unknown subcommand '$cmd' (guest-lib|lib|bin|overlay-vulkan|config-nodes|cfg|push|pull)"
     ;;
 esac

@@ -23,7 +23,7 @@ cd ..
 ## 2. Download and verify the release binaries
 
 ```sh
-V=v0.1.1
+V=vX.Y.Z  # use the first release tag that includes the dual-ABI guest layout
 B=https://github.com/Shiro836/waydroid-nvidia/releases/download/$V
 curl -LO $B/waydroid-nvidia-host-x86_64-$V.tar.zst
 curl -LO $B/waydroid-nvidia-guest-android-x86_64-$V.tar.zst
@@ -52,6 +52,12 @@ sudo tar --zstd -xf waydroid-nvidia-host-x86_64-$V.tar.zst          -C /usr/lib/
 sudo tar --zstd -xf waydroid-nvidia-guest-android-x86_64-$V.tar.zst -C /usr/lib/waydroid-nvidia/guest
 sudo tar --zstd -xf waydroid-nvidia-guest-prebuilts-$V.tar.zst      -C /usr/lib/waydroid-nvidia/guest
 ```
+
+Dual-ABI release tarballs retain Android-relative paths below that guest
+directory. Before running setup, both
+`guest/vendor/lib/hw/vulkan.virtio.so` (ELF32) and
+`guest/vendor/lib64/hw/vulkan.virtio.so` (ELF64) must exist; the setup helper
+checks every ANGLE/Venus ELF before changing the Waydroid configuration.
 
 ## 4. Units, tmpfiles, udev rule, setup helper
 

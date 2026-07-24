@@ -1,6 +1,6 @@
 ---
 # Clean-room CI builds of the waydroid-nvidia components that are fully
-# scripted today (see packaging/aur/PREREQS.md): the guest Venus driver
+# scripted today (see packaging/aur/PREREQS.md): the dual-ABI guest Venus drivers
 # (mesa), the host renderer (virglrenderer) and the gralloc backend.
 # Each job reproduces the stranger's path: fetch upstream at the pinned
 # BASE commit, apply patches/, build via the same build/<comp>/build.sh
@@ -29,8 +29,20 @@ permissions:
 
 jobs:
   mesa:
-    name: guest venus driver (mesa)
+    name: guest venus driver (mesa, ${{ matrix.android_abi }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - android_abi: x86_64
+            android_libdir: lib64
+            elf_class: ELF64
+            elf_machine: Advanced Micro Devices X86-64
+          - android_abi: x86
+            android_libdir: lib
+            elf_class: ELF32
+            elf_machine: Intel 80386
     steps:
       - uses: actions/checkout@v4
       - name: Load pins
@@ -54,6 +66,7 @@ jobs:
           sudo apt-get update -q
           sudo apt-get install -yq ninja-build python3-mako python3-yaml python3-pip bison flex pkg-config zstd glslang-tools
           pipx install meson  # mesa needs meson >= 1.4.0; ubuntu-24.04 apt has 1.3.2
+          pipx inject meson mako packaging pyyaml
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
       - name: Fetch mesa at pinned base
         run: |
@@ -67,16 +80,21 @@ jobs:
       - name: Build libvulkan_virtio.so
         run: |
           mkdir -p "$RUNNER_TEMP/empty-pkgconfig"
-          NDK="$HOME/android-ndk" NDK_PKGCONFIG="$RUNNER_TEMP/empty-pkgconfig" \
-            ./build/mesa/build.sh "$PWD/mesa-src" "$PWD/mesa-build"
-      - name: Stage artifact
+          ANDROID_ABI="${{ matrix.android_abi }}" NDK="$HOME/android-ndk" \
+            NDK_PKGCONFIG="$RUNNER_TEMP/empty-pkgconfig" \
+            ./build/mesa/build.sh "$PWD/mesa-src" "$PWD/mesa-build-${{ matrix.android_abi }}"
+      - name: Verify and stage artifact
         run: |
-          mkdir -p stage
-          cp -L mesa-build/src/virtio/vulkan/libvulkan_virtio.so stage/
+          src="mesa-build-${{ matrix.android_abi }}/src/virtio/vulkan/libvulkan_virtio.so"
+          readelf -h "$src" | grep -q "Class:.*${{ matrix.elf_class }}"
+          readelf -h "$src" | grep -q "Machine:.*${{ matrix.elf_machine }}"
+          readelf -d "$src" | grep -q 'SONAME.*libvulkan_virtio.so'
+          mkdir -p "stage/vendor/${{ matrix.android_libdir }}/hw"
+          cp -L "$src" "stage/vendor/${{ matrix.android_libdir }}/hw/vulkan.virtio.so"
       - uses: actions/upload-artifact@v4
         with:
-          name: guest-vulkan-virtio
-          path: stage/*
+          name: guest-vulkan-virtio-${{ matrix.android_abi }}
+          path: stage/
           if-no-files-found: error
 
   virglrenderer:
@@ -146,10 +164,12 @@ jobs:
         run: |
           NDK="$HOME/android-ndk" MINIGBM="$PWD/minigbm" \
             ./build/gralloc/build.sh "$PWD/gralloc-out"
+          mkdir -p stage/vendor/lib64
+          cp -L gralloc-out/libgbm_mesa_wrapper.so stage/vendor/lib64/
       - uses: actions/upload-artifact@v4
         with:
           name: guest-gralloc
-          path: gralloc-out/libgbm_mesa_wrapper.so
+          path: stage/
           if-no-files-found: error
 
   hwcomposer:
@@ -196,12 +216,12 @@ jobs:
         run: |
           WNV="$HOME/wnv" ROOTFS="$HOME/wnv/image-rootfs" NDK="$HOME/android-ndk" \
             ./build/hwcomposer/build.sh "$PWD/hwc-src/hwcomposer" "$PWD/hwc-out"
-          mkdir -p stage
-          cp hwc-out/hwcomposer.waydroid.stripped.so stage/hwcomposer.waydroid.so
+          mkdir -p stage/vendor/lib64/hw
+          cp hwc-out/hwcomposer.waydroid.stripped.so stage/vendor/lib64/hw/hwcomposer.waydroid.so
       - uses: actions/upload-artifact@v4
         with:
           name: guest-hwcomposer
-          path: stage/*
+          path: stage/
           if-no-files-found: error
 
   angle:
@@ -231,22 +251,36 @@ jobs:
             echo "target_os = ['android']" >> .gclient
           fi
           gclient sync --no-history -j16
-      - name: Build the three ANGLE libraries
+      - name: Build the x86 and x86_64 ANGLE libraries
         run: |
           W="$HOME/angle-ci"
           export PATH="$W/depot_tools:$PATH"
           cd "$W/angle"
-          mkdir -p out/AndroidX64
-          cp "$GITHUB_WORKSPACE/build/angle/args.gn" out/AndroidX64/args.gn
+          mkdir -p out/AndroidX64 out/AndroidX86
+          cp "$GITHUB_WORKSPACE/build/angle/args-x86_64.gn" out/AndroidX64/args.gn
+          cp "$GITHUB_WORKSPACE/build/angle/args-x86.gn" out/AndroidX86/args.gn
           buildtools/linux64/gn gen out/AndroidX64
+          buildtools/linux64/gn gen out/AndroidX86
           third_party/ninja/ninja -C out/AndroidX64 libEGL libGLESv2 libGLESv1_CM
-          mkdir -p "$GITHUB_WORKSPACE/stage"
+          third_party/ninja/ninja -C out/AndroidX86 libEGL libGLESv2 libGLESv1_CM
+          mkdir -p "$GITHUB_WORKSPACE/stage/vendor/lib64/egl"
+          mkdir -p "$GITHUB_WORKSPACE/stage/vendor/lib/egl"
           cp out/AndroidX64/libEGL_angle.so out/AndroidX64/libGLESv2_angle.so \
-             out/AndroidX64/libGLESv1_CM_angle.so "$GITHUB_WORKSPACE/stage/"
+             out/AndroidX64/libGLESv1_CM_angle.so "$GITHUB_WORKSPACE/stage/vendor/lib64/egl/"
+          cp out/AndroidX86/libEGL_angle.so out/AndroidX86/libGLESv2_angle.so \
+             out/AndroidX86/libGLESv1_CM_angle.so "$GITHUB_WORKSPACE/stage/vendor/lib/egl/"
+          for lib in "$GITHUB_WORKSPACE"/stage/vendor/lib/egl/*.so; do
+            readelf -h "$lib" | grep -q 'Class:.*ELF32'
+            readelf -h "$lib" | grep -q 'Machine:.*Intel 80386'
+          done
+          for lib in "$GITHUB_WORKSPACE"/stage/vendor/lib64/egl/*.so; do
+            readelf -h "$lib" | grep -q 'Class:.*ELF64'
+            readelf -h "$lib" | grep -q 'Machine:.*Advanced Micro Devices X86-64'
+          done
       - uses: actions/upload-artifact@v4
         with:
           name: guest-angle
-          path: stage/*
+          path: stage/
           if-no-files-found: error
 
   surfaceflinger:
@@ -262,12 +296,12 @@ jobs:
           TREE="${LINEAGE_TREE:-$HOME/repos/waydroid-nv/lineage-20}"
           [ -d "$TREE" ] || { echo "::error::lineage tree missing at $TREE"; exit 1; }
           (cd "$TREE" && ./build.sh sf)
-          mkdir -p stage
-          cp "$TREE/out/target/product/waydroid_x86_64/system/bin/surfaceflinger" stage/
+          mkdir -p stage/system/bin
+          cp "$TREE/out/target/product/waydroid_x86_64/system/bin/surfaceflinger" stage/system/bin/
       - uses: actions/upload-artifact@v4
         with:
           name: guest-surfaceflinger
-          path: stage/*
+          path: stage/
           if-no-files-found: error
 
   waydroid-patch-check:
@@ -277,13 +311,33 @@ jobs:
       - uses: actions/checkout@v4
       - name: Load pins
         run: cat packaging/ci/pins.env | grep -v '^#' >> "$GITHUB_ENV"
-      - name: Fetch waydroid and apply-check
+      - name: Fetch waydroid, apply patch and validate the dual-ABI mounts
         run: |
           git init -q waydroid
           git -C waydroid fetch -q --depth 1 "$WAYDROID_UPSTREAM" "$WAYDROID_SHA"
           git -C waydroid checkout -q FETCH_HEAD
-          git -C waydroid apply --check "$GITHUB_WORKSPACE"/patches/waydroid/0001-*.patch
-          echo "waydroid patch applies cleanly at $WAYDROID_SHA"
+          git -C waydroid apply "$GITHUB_WORKSPACE"/patches/waydroid/0001-*.patch
+          python3 -m compileall -q waydroid/tools
+          lxc=waydroid/tools/helpers/lxc.py
+          for path in \
+            vendor/lib/hw/vulkan.virtio.so \
+            vendor/lib/egl/libEGL_angle.so \
+            vendor/lib/egl/libGLESv1_CM_angle.so \
+            vendor/lib/egl/libGLESv2_angle.so \
+            vendor/lib64/hw/vulkan.virtio.so \
+            vendor/lib64/egl/libEGL_angle.so \
+            vendor/lib64/egl/libGLESv1_CM_angle.so \
+            vendor/lib64/egl/libGLESv2_angle.so \
+            vendor/lib64/libgbm_mesa_wrapper.so \
+            vendor/lib64/hw/hwcomposer.waydroid.so \
+            system/bin/surfaceflinger; do
+            grep -Fq "\"$path\"" "$lxc"
+          done
+          if grep -Fq 'vulkan.lvp.so' "$lxc"; then
+            echo "::error::Waydroid NVIDIA mounts still reference Lavapipe"
+            exit 1
+          fi
+          echo "waydroid patch and dual-ABI mounts validated at $WAYDROID_SHA"
 
   release:
     name: release (tarballs + SHA256SUMS + provenance)
@@ -301,17 +355,46 @@ jobs:
       - name: Assemble tarballs
         run: |
           TAG="${GITHUB_REF_NAME}"
+          verify_android_elf() {
+            file="$1"
+            expected_class="$2"
+            expected_machine="$3"
+            expected_soname="${4:-}"
+            test -f "$file"
+            LC_ALL=C readelf -h "$file" | grep -q "Class:.*${expected_class}"
+            LC_ALL=C readelf -h "$file" | grep -q "Machine:.*${expected_machine}"
+            LC_ALL=C readelf -h "$file" | grep -q 'Type:.*DYN'
+            if [ -n "$expected_soname" ]; then
+              LC_ALL=C readelf -d "$file" | grep -Fq "Library soname: [$expected_soname]"
+            fi
+          }
           mkdir -p out
           # host side: venus vtest server + render server + private lib
           mkdir -p host && cp artifacts/host-venus-server/* host/
+          chmod 0755 host/virgl_test_server host/virgl_render_server host/libvirglrenderer.so.1
           tar --zstd -C host -cf "out/waydroid-nvidia-host-x86_64-${TAG}.tar.zst" .
-          # guest side (android-x86_64): venus driver + gralloc backend
-          mkdir -p guest && cp artifacts/guest-vulkan-virtio/* artifacts/guest-gralloc/* guest/
+          # guest app-side drivers are dual ABI; system services remain x86_64.
+          mkdir -p guest
+          for artifact in guest-vulkan-virtio-x86 guest-vulkan-virtio-x86_64 guest-gralloc; do
+            cp -a "artifacts/$artifact"/. guest/
+          done
+          verify_android_elf guest/vendor/lib/hw/vulkan.virtio.so ELF32 'Intel 80386' libvulkan_virtio.so
+          verify_android_elf guest/vendor/lib64/hw/vulkan.virtio.so ELF64 'Advanced Micro Devices X86-64' libvulkan_virtio.so
+          verify_android_elf guest/vendor/lib64/libgbm_mesa_wrapper.so ELF64 'Advanced Micro Devices X86-64' libgbm_mesa_wrapper.so
           tar --zstd -C guest -cf "out/waydroid-nvidia-guest-android-x86_64-${TAG}.tar.zst" .
           # guest prebuilts — now CI-built and attested like everything else
           mkdir -p prebuilts
-          cp artifacts/guest-hwcomposer/* artifacts/guest-angle/* artifacts/guest-surfaceflinger/* prebuilts/
-          (cd prebuilts && sha256sum ./* > SHA256SUMS.prebuilts)
+          for artifact in guest-hwcomposer guest-angle guest-surfaceflinger; do
+            cp -a "artifacts/$artifact"/. prebuilts/
+          done
+          for lib in libEGL_angle.so libGLESv1_CM_angle.so libGLESv2_angle.so; do
+            verify_android_elf "prebuilts/vendor/lib/egl/$lib" ELF32 'Intel 80386' "$lib"
+            verify_android_elf "prebuilts/vendor/lib64/egl/$lib" ELF64 'Advanced Micro Devices X86-64' "$lib"
+          done
+          verify_android_elf prebuilts/vendor/lib64/hw/hwcomposer.waydroid.so ELF64 'Advanced Micro Devices X86-64' hwcomposer.waydroid.so
+          verify_android_elf prebuilts/system/bin/surfaceflinger ELF64 'Advanced Micro Devices X86-64'
+          chmod 0755 prebuilts/system/bin/surfaceflinger
+          (cd prebuilts && find vendor system -type f -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS.prebuilts)
           printf 'CI-built guest prebuilts: hwcomposer (provision.sh clean-room),\nANGLE (pinned %s), surfaceflinger (lineage-20 tree, self-hosted runner).\n' "${ANGLE_SHA:-see pins}" > prebuilts/README.txt
           tar --zstd -C prebuilts -cf "out/waydroid-nvidia-guest-prebuilts-${TAG}.tar.zst" .
           (cd out && sha256sum ./*.tar.zst > SHA256SUMS)

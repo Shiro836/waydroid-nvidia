@@ -31,6 +31,39 @@ PASS=(); FAIL=()
 ok()  { echo -e "\033[1;32m  PASS\033[0m $*"; PASS+=("$1"); }
 bad() { echo -e "\033[1;31m  FAIL\033[0m $*"; FAIL+=("$1"); }
 
+verify_android_elf() {
+    local file="$1" abi="$2" expected_class expected_machine header dynamic
+    case "$abi" in
+        x86)
+            expected_class=ELF32
+            expected_machine="Intel 80386"
+            ;;
+        x86_64)
+            expected_class=ELF64
+            expected_machine="Advanced Micro Devices X86-64"
+            ;;
+        *)
+            echo "unknown Android ABI '$abi'" >&2
+            return 1
+            ;;
+    esac
+
+    [ -f "$file" ] || { echo "missing artifact: $file" >&2; return 1; }
+    command -v readelf >/dev/null 2>&1 || {
+        echo "readelf is required to verify $file" >&2
+        return 1
+    }
+    header=$(LC_ALL=C readelf -h -- "$file" 2>/dev/null) || {
+        echo "not a readable ELF file: $file" >&2
+        return 1
+    }
+    grep -Eq "^[[:space:]]*Class:[[:space:]]+${expected_class}[[:space:]]*$" <<<"$header" &&
+        grep -Eq "^[[:space:]]*Machine:[[:space:]]+${expected_machine}[[:space:]]*$" <<<"$header" &&
+        grep -Eq '^[[:space:]]*Type:[[:space:]]+DYN([[:space:]]|$)' <<<"$header" || return 1
+    dynamic=$(LC_ALL=C readelf -dW -- "$file" 2>/dev/null) || return 1
+    grep -Eq 'SONAME.*\[libvulkan_virtio\.so\]' <<<"$dynamic"
+}
+
 checkout() { # comp -> prints fresh checkout dir on fd, worktrees tracked for cleanup
     local c="$1"; local dir="$WORK/$c"
     if [ "$SRC_MODE" = clone ]; then
@@ -44,15 +77,26 @@ checkout() { # comp -> prints fresh checkout dir on fd, worktrees tracked for cl
 }
 
 do_mesa() {
-    say "mesa: fresh $MESA_BASE + series -> cross-build libvulkan_virtio.so"
+    say "mesa: fresh $MESA_BASE + series -> cross-build x86 + x86_64 libvulkan_virtio.so"
     local d; d=$(checkout mesa) || { bad mesa "checkout"; return; }
     git -C "$d" am -q "$REPO"/patches/mesa/0001-*.patch "$REPO"/patches/mesa/0002-*.patch \
         && git -C "$d" apply "$REPO/patches/mesa/0003-wip-ahb-memory-steering.patch" \
         || { bad mesa "patch apply"; return; }
-    if "$REPO/build/mesa/build.sh" "$d" "$d/build-android-x86_64"; then
-        [ -f "$d/build-android-x86_64/src/virtio/vulkan/libvulkan_virtio.so" ] \
-            && ok mesa "libvulkan_virtio.so built" || bad mesa "artifact missing"
-    else bad mesa "build"; fi
+
+    local abi builddir artifact
+    for abi in x86_64 x86; do
+        builddir="$d/build-android-$abi"
+        artifact="$builddir/src/virtio/vulkan/libvulkan_virtio.so"
+        if ANDROID_ABI="$abi" "$REPO/build/mesa/build.sh" "$d" "$builddir"; then
+            if verify_android_elf "$artifact" "$abi"; then
+                ok "mesa-$abi" "$abi libvulkan_virtio.so built and ELF header verified"
+            else
+                bad "mesa-$abi" "$abi artifact has the wrong ELF class/machine"
+            fi
+        else
+            bad "mesa-$abi" "$abi build"
+        fi
+    done
 }
 
 do_virgl() {

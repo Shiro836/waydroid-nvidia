@@ -11,11 +11,11 @@ reference for what the script provides.
 
 | Component | Recipe | Clean-room today? | Missing provisioning |
 |---|---|---|---|
-| **mesa** (guest venus) | `build/mesa/build.sh` | ✅ yes — **CI-built** (build.yml) | none — NDK + meson + glslang makedeps |
+| **mesa** (guest venus, x86 + x86_64) | `build/mesa/build.sh` | ✅ yes — **CI-built** (build.yml matrix) | none — NDK + meson + glslang makedeps |
 | **virglrenderer** (host) | `build/virglrenderer/build.sh` | ✅ yes — **CI-built** (build.yml) | none — meson + venus/vulkan headers |
 | **gralloc** backend | `build/gralloc/build.sh` | ✅ yes — **CI-built** (build.yml) | minigbm fetched at pin in CI |
 | **hwcomposer** | `build/hwcomposer/provision.sh` + `build.sh` | ✅ yes — **CI-built** (clean-room, hwc-pins.env) | none |
-| **ANGLE** | `build/angle/args.gn` | ✅ **CI-built** on tags/dispatch (~2 h, pinned ANGLE_SHA) | none |
+| **ANGLE** (x86 + x86_64) | `build/angle/args-x86{,_64}.gn` | ✅ **CI-built** on tags/dispatch (~2 h, pinned ANGLE_SHA) | none |
 | **surfaceflinger** | `build/lineage-20/build.sh` | ✅ **CI-built** on the self-hosted runner (label: lineage) | runner host carries the synced tree |
 
 `reproduce.sh` (SRC_MODE=worktree default; `SRC_MODE=clone` for true from-scratch)

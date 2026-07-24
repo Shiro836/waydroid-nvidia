@@ -3,19 +3,39 @@
 # recipe (build/<comp>/build.sh) against the PERSISTENT working tree
 # (incremental). packaging/aur reproduce.sh calls the SAME recipes against a
 # fresh checkout — one recipe, two front-ends. Does NOT deploy (see dev/deploy).
-# Usage: dev/build <mesa|virgl|hwc|gralloc|angle|all>
+# Usage: dev/build <mesa[-x86|-x86_64]|virgl|hwc|gralloc|angle[-x86|-x86_64]|all>
 source "$(dirname "$(readlink -f "$0")")/env.sh"
 B="$REPO/build"
 
+build_angle() {
+    local abi="$1" out args
+    case "$abi" in
+        x86_64) out="$ANGLE_OUT_X86_64"; args="$B/angle/args-x86_64.gn" ;;
+        x86)    out="$ANGLE_OUT_X86";    args="$B/angle/args-x86.gn" ;;
+        *)      die "unsupported ANGLE ABI: $abi" ;;
+    esac
+    mkdir -p "$out"
+    cp "$args" "$out/args.gn"
+    (cd "$ANGLE_TREE" && buildtools/linux64/gn gen "$out")
+    "$ANGLE_TREE/third_party/ninja/ninja" -C "$out" \
+        libEGL libGLESv2 libGLESv1_CM
+    echo "  -> $out/lib{EGL,GLESv2,GLESv1_CM}_angle.so"
+}
+
 case "${1:-}" in
-    mesa)    say "mesa (guest venus driver)";  "$B/mesa/build.sh"  "$MESA_TREE" "$MESA_BUILD" ;;
+    mesa)    "$0" mesa-x86_64; "$0" mesa-x86 ;;
+    mesa-x86_64)
+             say "mesa (guest venus driver, x86_64)"
+             ANDROID_ABI=x86_64 "$B/mesa/build.sh" "$MESA_TREE" "$MESA_BUILD_X86_64" ;;
+    mesa-x86)
+             say "mesa (guest venus driver, x86/i686)"
+             ANDROID_ABI=x86 "$B/mesa/build.sh" "$MESA_TREE" "$MESA_BUILD_X86" ;;
     virgl)   say "virglrenderer (host renderer)"; REPO="$REPO" "$B/virglrenderer/build.sh" "$VIRGL_TREE" "$VIRGL_BUILD" ;;
     hwc)     say "hwcomposer"; "$B/hwcomposer/build.sh" "$HWC_TREE/hwcomposer" "$HWC_BUILD/out" ;;
     gralloc) say "gralloc backend"; REPO="$REPO" "$B/gralloc/build.sh" "$HWC_BUILD/out" ;;
-    angle)   say "ANGLE (rare, slow)"
-             "$ANGLE_TREE/third_party/ninja/ninja" -C "$ANGLE_TREE/out/AndroidX64" \
-                 libEGL libGLESv2 libGLESv1_CM
-             echo "  -> $ANGLE_TREE/out/AndroidX64/lib{EGL,GLESv2,GLESv1_CM}_angle.so" ;;
+    angle)   "$0" angle-x86_64; "$0" angle-x86 ;;
+    angle-x86_64) say "ANGLE (x86_64, rare, slow)"; build_angle x86_64 ;;
+    angle-x86)    say "ANGLE (x86/i686, rare, slow)"; build_angle x86 ;;
     all)     "$0" mesa; "$0" virgl; "$0" hwc ;;
-    *) die "usage: dev/build <mesa|virgl|hwc|gralloc|angle|all>" ;;
+    *) die "usage: dev/build <mesa[-x86|-x86_64]|virgl|hwc|gralloc|angle[-x86|-x86_64]|all>" ;;
 esac

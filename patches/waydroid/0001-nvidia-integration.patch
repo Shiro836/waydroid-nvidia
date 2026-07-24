@@ -44,10 +44,10 @@ index 92190ab..c1d96fe 100644
      for node in sorted(glob.glob("/dev/dri/renderD*")):
          renderDev = os.path.basename(node)
 diff --git a/tools/helpers/lxc.py b/tools/helpers/lxc.py
-index d3f6c24..2983b0c 100644
+index d3f6c24..e72935c 100644
 --- a/tools/helpers/lxc.py
 +++ b/tools/helpers/lxc.py
-@@ -124,6 +124,25 @@ def generate_nodes_lxc_config(args):
+@@ -124,6 +124,47 @@ def generate_nodes_lxc_config(args):
      # NFC config
      make_entry("/system/etc/libnfc-nci.conf", options="bind,optional 0 0")
  
@@ -62,13 +62,35 @@ index d3f6c24..2983b0c 100644
 +    if venus_socket:
 +        venus_dir = os.path.dirname(venus_socket)
 +        nodes.append("lxc.mount.entry = {} dev/venus none rbind,create=dir 0 0".format(venus_dir))
-+        nodes.append("lxc.mount.entry = /var/lib/waydroid/overlay/vendor/lib64/hw/vulkan.virtio.so vendor/lib64/hw/vulkan.virtio.so none rbind,create=file 0 0")
-+        nodes.append("lxc.mount.entry = /var/lib/waydroid/nv/libgbm_mesa_wrapper.so vendor/lib64/libgbm_mesa_wrapper.so none rbind,create=file 0 0")
-+        nodes.append("lxc.mount.entry = /var/lib/waydroid/nv/hwcomposer.waydroid.so vendor/lib64/hw/hwcomposer.waydroid.so none rbind,create=file 0 0")
-+        nodes.append("lxc.mount.entry = /var/lib/waydroid/nv/libEGL_angle.so vendor/lib64/egl/libEGL_angle.so none rbind,create=file 0 0")
-+        nodes.append("lxc.mount.entry = /var/lib/waydroid/nv/libGLESv1_CM_angle.so vendor/lib64/egl/libGLESv1_CM_angle.so none rbind,create=file 0 0")
-+        nodes.append("lxc.mount.entry = /var/lib/waydroid/nv/libGLESv2_angle.so vendor/lib64/egl/libGLESv2_angle.so none rbind,create=file 0 0")
-+        nodes.append("lxc.mount.entry = /var/lib/waydroid/nv/surfaceflinger system/bin/surfaceflinger none rbind,create=file 0 0")
++        if cfg["waydroid"].get("nvidia_guest_layout") == "2":
++            guest_root = "/var/lib/waydroid/nv/guest"
++            guest_files = (
++                "vendor/lib/hw/vulkan.virtio.so",
++                "vendor/lib/egl/libEGL_angle.so",
++                "vendor/lib/egl/libGLESv1_CM_angle.so",
++                "vendor/lib/egl/libGLESv2_angle.so",
++                "vendor/lib64/hw/vulkan.virtio.so",
++                "vendor/lib64/egl/libEGL_angle.so",
++                "vendor/lib64/egl/libGLESv1_CM_angle.so",
++                "vendor/lib64/egl/libGLESv2_angle.so",
++                "vendor/lib64/libgbm_mesa_wrapper.so",
++                "vendor/lib64/hw/hwcomposer.waydroid.so",
++                "system/bin/surfaceflinger",
++            )
++            for guest_file in guest_files:
++                nodes.append(
++                    "lxc.mount.entry = {}/{} {} none rbind,create=file 0 0".format(
++                        guest_root, guest_file, guest_file))
++        else:
++            # Compatibility with installations provisioned before the dual-ABI
++            # guest layout. The next setup run migrates them atomically.
++            nodes.append("lxc.mount.entry = /var/lib/waydroid/overlay/vendor/lib64/hw/vulkan.virtio.so vendor/lib64/hw/vulkan.virtio.so none rbind,create=file 0 0")
++            nodes.append("lxc.mount.entry = /var/lib/waydroid/nv/libgbm_mesa_wrapper.so vendor/lib64/libgbm_mesa_wrapper.so none rbind,create=file 0 0")
++            nodes.append("lxc.mount.entry = /var/lib/waydroid/nv/hwcomposer.waydroid.so vendor/lib64/hw/hwcomposer.waydroid.so none rbind,create=file 0 0")
++            nodes.append("lxc.mount.entry = /var/lib/waydroid/nv/libEGL_angle.so vendor/lib64/egl/libEGL_angle.so none rbind,create=file 0 0")
++            nodes.append("lxc.mount.entry = /var/lib/waydroid/nv/libGLESv1_CM_angle.so vendor/lib64/egl/libGLESv1_CM_angle.so none rbind,create=file 0 0")
++            nodes.append("lxc.mount.entry = /var/lib/waydroid/nv/libGLESv2_angle.so vendor/lib64/egl/libGLESv2_angle.so none rbind,create=file 0 0")
++            nodes.append("lxc.mount.entry = /var/lib/waydroid/nv/surfaceflinger system/bin/surfaceflinger none rbind,create=file 0 0")
 +
      return nodes
  
