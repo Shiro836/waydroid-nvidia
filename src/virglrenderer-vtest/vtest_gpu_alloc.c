@@ -340,7 +340,7 @@ vtest_gpu_alloc_image(uint32_t width, uint32_t height, uint32_t drm_format,
    uint32_t mem_type = UINT32_MAX;
    const VkMemoryPropertyFlags want =
       linear ? (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
-                VK_MEMORY_PROPERTY_HOST_CACHED_BIT)
+                VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)
              : VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
    for (uint32_t i = 0; i < vk->mem_props.memoryTypeCount; i++) {
       if ((reqs.memoryTypeBits & (1u << i)) &&
@@ -428,9 +428,17 @@ int
 vtest_gpu_alloc_cpu(uint32_t width, uint32_t height, uint32_t drm_format,
                     uint32_t *out_stride, uint64_t *out_size, int *out_fd)
 {
-   /* experiment control: udmabuf-first (NVIDIA-linear path suspected of
-    * breaking hwcomposer's own SW buffers) */
-{
+   /* NVIDIA renders corruptly into kernel-allocated (udmabuf) LINEAR memory
+    * but cleanly into its own exported LINEAR memory (host probes: residual
+    * -9/dips=141 vs -0.03/dips=0). Allocate CPU-mappable buffers as NVIDIA's
+    * own LINEAR memory so guest renders into them are clean. Fall back to a
+    * plain udmabuf when the format isn't renderable (non-whitelisted; NV12
+    * has no VkFormat and always takes this path). */
+   uint64_t modifier = 0;
+   if (vtest_gpu_alloc_image(width, height, drm_format, true, out_stride,
+                             &modifier, out_size, out_fd) == 0)
+      return 0;
+
    uint32_t stride;
    uint64_t size;
    if (drm_format == ALLOC_DRM_FORMAT_NV12) {
@@ -492,5 +500,4 @@ vtest_gpu_alloc_cpu(uint32_t width, uint32_t height, uint32_t drm_format,
    *out_size = size;
    *out_fd = dmabuf;
    return 0;
-}
 }
