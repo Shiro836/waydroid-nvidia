@@ -150,8 +150,48 @@ for rel in "${GUEST_BINS[@]}"; do
     install -Dm 0755 "$GUEST/$rel" "$NV_GUEST/$rel"
 done
 
+# -- compositor compatibility -----------------------------------------------
+# persist.waydroid.use_subsurface=true drives hwcomposer's direct-subsurface
+# path: the guest's layers are handed to the host compositor as Wayland
+# subsurfaces instead of being composited in the guest. Only KWin — and the
+# gamescope nesting the README documents — has been validated with it.
+#
+# On GNOME/Mutter, hwcomposer's worker thread aborts (SIGABRT) as soon as a
+# full-screen app creates its first layer. SurfaceFlinger then dies on
+# Hwc2::HidlComposer::setLayerHandleInfo() with DEAD_OBJECT, the display stack
+# restart-loops, and every `waydroid app launch` fails with "Sending reply
+# failed" — system apps included, so it does not look like a display problem.
+# Fall back to in-guest GPU composition on anything that is not KWin.
+#
+# This is a safety net, not the fix: hwcomposer's compositor-compatibility
+# gate is what should degrade on its own. Drop the heuristic once it does.
+# ---------------------------------------------------------------------------
+detect_compositor() {
+    # setup runs under sudo, which scrubs the desktop environment, so probe
+    # the running session rather than trusting $XDG_CURRENT_DESKTOP.
+    local c
+    for c in kwin_wayland kwin_x11 gamescope; do
+        pgrep -x "$c" >/dev/null 2>&1 && { echo kwin; return; }
+    done
+    for c in gnome-shell mutter; do
+        pgrep -x "$c" >/dev/null 2>&1 && { echo mutter; return; }
+    done
+    pgrep -x Hyprland >/dev/null 2>&1 && { echo hyprland; return; }
+    pgrep -x sway     >/dev/null 2>&1 && { echo sway; return; }
+    echo unknown
+}
+
+COMPOSITOR="$(detect_compositor)"
+if [ "$COMPOSITOR" = kwin ]; then
+    USE_SUBSURFACE=true
+else
+    USE_SUBSURFACE=false
+fi
+echo "== compositor: $COMPOSITOR -> persist.waydroid.use_subsurface=$USE_SUBSURFACE"
+
 echo "== writing waydroid.cfg properties"
-REFRESH="$REFRESH" NVNODE="$NVNODE" python3 - "$CFG" <<'EOF'
+REFRESH="$REFRESH" NVNODE="$NVNODE" USE_SUBSURFACE="$USE_SUBSURFACE" \
+    python3 - "$CFG" <<'EOF'
 import configparser, os, sys
 cfg_path = sys.argv[1]
 cp = configparser.ConfigParser()
@@ -177,7 +217,9 @@ props = {
     "debug.hwui.renderer": "skiavk",
     "debug.renderengine.backend": "skiaglthreaded",
     "debug.sf.nobootanimation": "1",
-    "persist.waydroid.use_subsurface": "true",
+    # Only the KWin-validated direct-subsurface path keeps this on; see the
+    # compositor probe above for why.
+    "persist.waydroid.use_subsurface": os.environ.get("USE_SUBSURFACE", "false"),
     "ro.surface_flinger.vsync_event_phase_offset_ns": "0",
     "ro.surface_flinger.vsync_sf_event_phase_offset_ns": "0",
     "ro.surface_flinger.max_frame_buffer_acquired_buffers": "3",
