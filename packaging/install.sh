@@ -144,6 +144,9 @@ need=(curl tar zstd gzip sha256sum python3 git)          # verification (--check
 for tool in "${need[@]}"; do
     command -v "$tool" >/dev/null 2>&1 || die "$tool is required (install it${DEPS:+, or drop --no-deps}; --check installs no packages)"
 done
+# the tools and Waydroid's generator use Python 3.11 (hashlib.file_digest)
+[ "$CHECK" = 1 ] || python3 -c 'import sys; sys.exit(sys.version_info < (3, 11))' ||
+    die "Python 3.11 or newer is required, $(command -v python3) is $(python3 -V 2>&1) (Ubuntu 22.04 ships 3.10: use Ubuntu 24.04 or newer)"
 
 # ---------------------------------------------------------------- assets
 WORK=$(mktemp -d)
@@ -257,6 +260,7 @@ for cand in /usr/bin/python3 /usr/local/bin/python3; do
     [ -x "$cand" ] && "$cand" -c 'import dbus, gi, gbinder' >/dev/null 2>&1 && { PYBIN=$cand; break; }
 done
 [ -n "$PYBIN" ] || die "no system python3 with the dbus, gobject and gbinder bindings (install python3-dbus, python3-gi/python3-gobject, python3-gbinder)"
+"$PYBIN" -c 'import sys; sys.exit(sys.version_info < (3, 11))' || die "$PYBIN is $("$PYBIN" -V 2>&1); Python 3.11 or newer is required"
 sed -i "1s|^#!.*python3.*$|#!$PYBIN|" "$ROOT/usr/lib/waydroid/waydroid.py"
 
 info "host Venus renderer, guest stack, nvidia-prolapse vendor image, bundle and tools"
