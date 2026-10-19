@@ -6,3 +6,8 @@ base-commit: a33a5c0  (Merge #2218 aidl-gralloc5)
 # gpu.py: explicit drm_device in waydroid.cfg bypasses the nvidia blacklist
 #         (waydroid-nvidia-setup writes the NVIDIA render node there; without it
 #         NVIDIA-only hosts get no /dev/dri node -> SF crash loop, issue #1883).
+# lxc.py: lxc.apparmor.profile only when this host's LXC parses it (an LXC built
+#         without AppArmor, e.g. Fedora's, refuses the whole config); asked of
+#         lxc-info with a scratch container, never decided by distro name.
+# waydroid-net.sh: where firewalld runs, waydroid0 joins its trusted zone
+#         (the container's DHCP/DNS; Fedora's own package does the same).

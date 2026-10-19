@@ -2,9 +2,11 @@
 # Unit tests for NVIDIA-native mode (no root, no container, no GPU access needed).
 #   python3 -m unittest -v waydroid/test_nvidia_native.py      (after dev/build-waydroid)
 # SPDX-License-Identifier: GPL-3.0-or-later
+import contextlib
 import importlib.util
 import json
 import os
+import shutil
 import sys
 import tempfile
 import types
@@ -885,6 +887,66 @@ def import_tree():
     import tools.helpers.nvidia_native as tree_nn
     import tools.helpers.gpu as gpu
     return lxc, tree_nn, gpu
+
+
+class LxcAppArmorTest(unittest.TestCase):
+    """lxc.py drop_unsupported_apparmor() (baseline patch): lxc.apparmor.profile stays only when this host's LXC
+    parses it. Fedora's LXC is built without AppArmor and refuses the whole config (issue #27)."""
+    BASE = "lxc.uts.name = waydroid\n\nlxc.apparmor.profile = unconfined\nlxc.no_new_privs = 1\n"
+    REFUSED = "lxc-info: probe: ../src/lxc/confile.c: set_config_apparmor_profile: 1651 Invalid argument - Built without AppArmor support"
+
+    def setUp(self):
+        self.lxc, _, _ = import_tree()
+        self.tmp = tempfile.TemporaryDirectory()
+        self.config = os.path.join(self.tmp.name, "config")
+        with open(self.config, "w") as f:
+            f.write(self.BASE)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def drop(self, verdicts):
+        import subprocess
+        probed = []
+
+        def run(argv, **kwargs):
+            self.assertEqual(argv[:2], ["lxc-info", "-P"])
+            self.assertEqual(kwargs["env"]["LC_ALL"], "C")
+            with open(os.path.join(argv[2], "probe", "config")) as f:
+                probed.append(f.read())
+            code, err = verdicts.pop(0)
+            return subprocess.CompletedProcess(argv, code, "", err)
+        with mock.patch.object(self.lxc.subprocess, "run", side_effect=run), \
+                self.assertLogs(level="INFO") if verdicts[-1][0] else contextlib.nullcontext():
+            self.lxc.drop_unsupported_apparmor(self.config)
+        with open(self.config) as f:
+            return probed, f.read()
+
+    def test_kept_where_lxc_parses_it(self):
+        probed, text = self.drop([(0, ""), (0, "")])
+        self.assertEqual(probed, ["", "lxc.apparmor.profile = unconfined\n"])
+        self.assertEqual(text, self.BASE)
+
+    def test_dropped_where_lxc_refuses_it(self):
+        probed, text = self.drop([(0, ""), (1, self.REFUSED)])
+        self.assertEqual(text, self.BASE.replace("lxc.apparmor.profile = unconfined\n", ""))
+
+    def test_lxc_that_loads_nothing_is_an_error(self):
+        with self.assertRaisesRegex(OSError, "cannot load an empty container config"):
+            self.drop([(1, "lxc-info: broken"), (0, "")])
+
+    def test_no_key_no_probe(self):
+        with open(self.config, "w") as f:
+            f.write("lxc.uts.name = waydroid\n")
+        probed, _ = self.drop([(0, "")])
+        self.assertEqual(probed, [])
+
+    @unittest.skipUnless(shutil.which("lxc-info"), "LXC not installed")
+    def test_real_lxc_answers(self):
+        self.assertEqual(self.lxc.lxc_parses(""), (True, ""))
+        ok, message = self.lxc.lxc_parses("lxc.no_such_key = 1\n")
+        self.assertFalse(ok)
+        self.assertIn('Unsupported config key "lxc.no_such_key"', message)
 
 
 class LxcIntegrationTest(FakeHostMixin, unittest.TestCase):

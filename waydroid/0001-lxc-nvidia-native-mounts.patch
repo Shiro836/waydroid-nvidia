@@ -77,7 +77,7 @@ index 36bd09b..6a7be3c 100644
          for prop in props:
              f.write(prop + "\n")
 diff --git a/tools/helpers/lxc.py b/tools/helpers/lxc.py
-index e72935c..e6db75b 100644
+index b70dcf1..8a40c5a 100644
 --- a/tools/helpers/lxc.py
 +++ b/tools/helpers/lxc.py
 @@ -125,16 +125,45 @@ def generate_nodes_lxc_config(args):
@@ -172,7 +172,7 @@ index e72935c..e6db75b 100644
      return nodes
  
  LXC_APPARMOR_PROFILE = "lxc-waydroid"
-@@ -393,8 +445,18 @@ def make_base_props(args):
+@@ -427,8 +479,18 @@ def make_base_props(args):
      if prop_fp != "":
          props.append("ro.build.fingerprint=" + prop_fp)
  
@@ -192,7 +192,7 @@ index e72935c..e6db75b 100644
      for k, v in cfg["properties"].items():
          for idx, elem in enumerate(props):
              if (k+"=") in elem:
-@@ -454,6 +516,18 @@ def wait_for_running(args):
+@@ -488,6 +550,18 @@ def wait_for_running(args):
          raise OSError("container failed to start")
  
  def start(args):

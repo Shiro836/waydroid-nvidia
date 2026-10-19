@@ -1,3 +1,20 @@
+diff --git a/data/scripts/waydroid-net.sh b/data/scripts/waydroid-net.sh
+index 3ce3910..8e3cf3a 100755
+--- a/data/scripts/waydroid-net.sh
++++ b/data/scripts/waydroid-net.sh
+@@ -71,6 +71,12 @@ _ifup() {
+     ip addr add ${CIDR_ADDR} broadcast + dev ${LXC_BRIDGE}
+     ip link set dev ${LXC_BRIDGE} address $LXC_BRIDGE_MAC
+     ip link set dev ${LXC_BRIDGE} up
++    # firewalld drops the container's DHCP and DNS on an interface outside a permissive zone (Fedora's own
++    # package adds this call too); only where firewalld runs
++    if command -v firewall-cmd >/dev/null 2>&1 && firewall-cmd --state >/dev/null 2>&1; then
++        firewall-cmd --zone=trusted --add-interface=${LXC_BRIDGE} >/dev/null ||
++            echo "waydroid-net: firewalld refused ${LXC_BRIDGE} in the trusted zone; Android gets no network until it is (firewall-cmd --zone=trusted --add-interface=${LXC_BRIDGE})" >&2
++    fi
+ }
+ 
+ start_ipv6() {
 diff --git a/tools/actions/session_manager.py b/tools/actions/session_manager.py
 index 4e8426c..3e47fa7 100644
 --- a/tools/actions/session_manager.py
@@ -44,7 +61,7 @@ index 92190ab..c1d96fe 100644
      for node in sorted(glob.glob("/dev/dri/renderD*")):
          renderDev = os.path.basename(node)
 diff --git a/tools/helpers/lxc.py b/tools/helpers/lxc.py
-index d3f6c24..e72935c 100644
+index d3f6c24..b70dcf1 100644
 --- a/tools/helpers/lxc.py
 +++ b/tools/helpers/lxc.py
 @@ -124,6 +124,47 @@ def generate_nodes_lxc_config(args):
@@ -95,6 +112,54 @@ index d3f6c24..e72935c 100644
      return nodes
  
  LXC_APPARMOR_PROFILE = "lxc-waydroid"
+@@ -140,6 +181,39 @@ def get_apparmor_status(args):
+         enabled = False
+     return enabled
+ 
++APPARMOR_KEYS = ("lxc.aa_profile", "lxc.apparmor.profile")
++
++def lxc_parses(config_text):
++    """lxc-info's verdict on a container config: (True, "") when this host's LXC loads it, else (False, LXC's
++    message). lxc-info parses the config of the container it describes, so a scratch container answers it."""
++    import tempfile
++    with tempfile.TemporaryDirectory(prefix="waydroid-lxc-probe-") as tmp:
++        os.mkdir(os.path.join(tmp, "probe"))
++        with open(os.path.join(tmp, "probe", "config"), "w") as f:
++            f.write(config_text)
++        proc = subprocess.run(["lxc-info", "-P", tmp, "-n", "probe"], capture_output=True, text=True,
++                              env=dict(os.environ, LC_ALL="C"))
++    return proc.returncode == 0, proc.stderr.strip()
++
++def drop_unsupported_apparmor(config_path):
++    """An LXC built without AppArmor (Fedora's) refuses lxc.apparmor.profile ("Built without AppArmor support")
++    and then cannot load the container at all. Keep the key only when this host's LXC parses it."""
++    with open(config_path) as f:
++        lines = f.read().splitlines(True)
++    keys = [l for l in lines if l.split("=")[0].strip() in APPARMOR_KEYS]
++    if not keys:
++        return
++    ok, message = lxc_parses("")
++    if not ok:
++        raise OSError("LXC cannot load an empty container config (lxc-info -P <scratch> -n probe): " + message)
++    ok, message = lxc_parses("".join(keys))
++    if ok:
++        return
++    logging.info("LXC rejects {} ({}): leaving it out of the container config".format(
++        " / ".join(l.strip() for l in keys), message.splitlines()[0] if message else "no message"))
++    with open(config_path, "w") as f:
++        f.writelines(l for l in lines if l not in keys)
++
+ def set_lxc_config(args):
+     lxc_path = tools.config.defaults["lxc"] + "/waydroid"
+     lxc_ver = get_lxc_version(args)
+@@ -172,6 +246,7 @@ def set_lxc_config(args):
+     if get_apparmor_status(args):
+         command = ["sed", "-i", "-E", "/lxc.aa_profile|lxc.apparmor.profile/ s/unconfined/{}/g".format(LXC_APPARMOR_PROFILE), lxc_path + "/config"]
+         tools.helpers.run.user(args, command)
++    drop_unsupported_apparmor(lxc_path + "/config")
+ 
+     nodes = generate_nodes_lxc_config(args)
+     config_nodes_tmp_path = args.work + "/config_nodes"
 diff --git a/tools/services/hardware_manager.py b/tools/services/hardware_manager.py
 index 072df41..7f74391 100644
 --- a/tools/services/hardware_manager.py
