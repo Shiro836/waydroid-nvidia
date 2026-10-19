@@ -23,6 +23,11 @@ module) as a Waydroid OTA zip plus its OTA channel JSON (packaging/vendor-ota.py
      vendor-image, runs `waydroid upgrade -o`, `dev/driver-mode verify-active`, and the container unit's
      ExecStartPre drop-in. Any failure puts the previous image, waydroid.cfg, record and drop-in back.
 
+A GPU without an NVDEC class the Codec2 decoder drives (before Turing) installs without hardware decode: the gate's
+nvc2-xmlgen exits 3, the codec list has no codecs, and the image's service .rc (made oneshot) and a VINTF fragment
+without the Codec2 HAL are written next to it for the generator to bind (nvidia_native.VENDOR_IMAGE_NO_NVDEC), so
+Android uses its software decoders. The setup says so in one line.
+
 A re-run with the same image on the same kernel module skips the gate. After an NVIDIA driver update the
 generator refuses to start until `install` ran again (re-gate, new codec list).
 
@@ -157,6 +162,29 @@ def check_prebuilts(image, record, work):
     say(f'{len(IMAGE_PREBUILTS)} bundle binaries in the image are byte-identical to the release bundle')
 
 
+def state_files():
+    """Every file `install` writes into the state directory (backed up, restored and removed together)."""
+    return (native.VENDOR_IMAGE_RECORD, native.VENDOR_IMAGE_XML, *native.VENDOR_IMAGE_NO_NVDEC.values())
+
+
+def no_nvdec_files(image, work):
+    """GPU without hardware decode: the image's Codec2 service .rc made oneshot and a VINTF fragment without the
+    Codec2 HAL (nvidia_native.VENDOR_IMAGE_NO_NVDEC), written into `work`. Returns {image path: file}."""
+    rc = image_file(image, '/' + native.MEDIA_RC, work / 'image-service.rc')
+    try:
+        text = native.no_nvdec_rc(rc.read_text())
+    except OSError as error:
+        raise RuntimeError(f'{image}: {error}; the vendor image and the package come from different builds; '
+                           'reinstall the package')
+    finally:
+        rc.unlink()
+    out = {native.MEDIA_RC: work / native.VENDOR_IMAGE_NO_NVDEC[native.MEDIA_RC],
+           native.MEDIA_VINTF: work / native.VENDOR_IMAGE_NO_NVDEC[native.MEDIA_VINTF]}
+    out[native.MEDIA_RC].write_text(text)
+    out[native.MEDIA_VINTF].write_text(native.NO_NVDEC_VINTF_TEXT)
+    return out
+
+
 def container_stopped():
     if sn().container_state() != 'STOPPED':
         raise RuntimeError('stop the Waydroid session and container first (waydroid session stop; '
@@ -224,9 +252,12 @@ def install(args):
         gl = args.native_gl or (w.get(native.GL_KEY) if w.get(native.GL_KEY) in ('on', 'off') else 'off')
         if old and old['vendor_img']['sha256'] == image_sha and old['kernel_module'] == kernel and \
                 old['build_record_sha256'] == bundle_sha and (state / native.VENDOR_IMAGE_XML).is_file() and \
-                sha256(state / native.VENDOR_IMAGE_XML) == old['media']['xml_sha256']:
+                sha256(state / native.VENDOR_IMAGE_XML) == old['media']['xml_sha256'] and \
+                all((state / n).is_file() and sha256(state / n) == old['media']['no_nvdec'][t]
+                    for t, n in native.VENDOR_IMAGE_NO_NVDEC.items() if not old['media']['hardware_decode']):
             say(f'already gated on kernel module {kernel} ({old["gate"]["log_dir"]}); not gating again')
             gate, media, native_gl_ok, xml = old['gate'], old['media'], old['native_gl'], state / native.VENDOR_IMAGE_XML
+            no_nvdec = {} if media['hardware_decode'] else {t: state / n for t, n in native.VENDOR_IMAGE_NO_NVDEC.items()}
         else:
             gate_mod.LOG_ROOT.mkdir(parents=True, exist_ok=True)
             work = Path(tempfile.mkdtemp(prefix='vendor-image-check-', dir=gate_mod.LOG_ROOT))
@@ -238,9 +269,13 @@ def install(args):
             gate = {'exit': 0, 'kernel_module': vk['kernel_module'], 'log_dir': vk['log_dir'],
                     'finished': gl_rec['gate']['finished'], 'runner': vk['runner'],
                     'cases': len(vk['cases']) + len(gl_rec['gate']['cases'])}
-            media = {'xml_sha256': media_rec['xml_sha256'], 'codecs': media_rec['codecs'], 'gate': media_rec['gate']}
+            media = {'xml_sha256': media_rec['xml_sha256'], 'codecs': media_rec['codecs'], 'gate': media_rec['gate'],
+                     'hardware_decode': media_rec['hardware_decode']}
             native_gl_ok = gl_rec['enabled']
             xml = Path(media_rec['xml'])
+            no_nvdec = {} if media['hardware_decode'] else no_nvdec_files(new, xml.parent)
+            if no_nvdec:
+                media.update(reason=media_rec['reason'], no_nvdec={t: sha256(f) for t, f in no_nvdec.items()})
             if gate['kernel_module'] != kernel:
                 raise RuntimeError(f'kernel module changed during the gate ({kernel} -> {gate["kernel_module"]})')
     except BaseException:
@@ -254,7 +289,7 @@ def install(args):
     backup = WORK / ('before-vendor-image-' + time.strftime('%Y%m%d-%H%M%S'))
     backup.mkdir()
     shutil.copy2(CFG, backup / 'waydroid.cfg')
-    for name in (native.VENDOR_IMAGE_RECORD, native.VENDOR_IMAGE_XML):
+    for name in state_files():
         if (state / name).exists():
             shutil.copy2(state / name, backup / name)
     if srcn.OVERRIDE.exists():
@@ -287,6 +322,13 @@ def install(args):
         if Path(xml) != state / native.VENDOR_IMAGE_XML:          # a re-run without a new gate keeps the gated one
             shutil.copy2(xml, state / native.VENDOR_IMAGE_XML)
         os.chmod(state / native.VENDOR_IMAGE_XML, 0o644)
+        for target, name in native.VENDOR_IMAGE_NO_NVDEC.items():
+            if target not in no_nvdec:
+                (state / name).unlink(missing_ok=True)
+            elif Path(no_nvdec[target]) != state / name:
+                shutil.copy2(no_nvdec[target], state / name)
+            if target in no_nvdec:
+                os.chmod(state / name, 0o644)
         rec = {'format': native.VENDOR_IMAGE_RECORD_FORMAT, 'version': version, 'build_record_sha256': bundle_sha,
                'release': record.get('release'), 'commit': record['commit'],
                'vendor_img': {'path': str(live), 'sha256': image_sha, 'zip': zpath.name,
@@ -326,7 +368,7 @@ def install(args):
         elif moved_official:
             shutil.copy2(official / 'vendor.img', live)
         shutil.copy2(backup / 'waydroid.cfg', CFG)
-        for name in (native.VENDOR_IMAGE_RECORD, native.VENDOR_IMAGE_XML):
+        for name in state_files():
             if (backup / name).exists():
                 shutil.copy2(backup / name, state / name)
             else:
@@ -341,6 +383,8 @@ def install(args):
     previous.unlink(missing_ok=True)
     print(f'Installed the nvidia-prolapse vendor image {version} (gated on kernel module {kernel}; previous '
           f'configuration in {backup}).', flush=True)
+    if not media['hardware_decode']:
+        print(media['reason'], flush=True)
 
 
 def restore_official(args):
@@ -371,7 +415,7 @@ def restore_official(args):
         (official / 'official.json').unlink()
         (official / 'vendor.img').unlink(missing_ok=True)
         say(f'official vendor image back in place ({info["fingerprint"]}); vendor_ota = {w["vendor_ota"]}')
-    for name in (native.VENDOR_IMAGE_RECORD, native.VENDOR_IMAGE_XML):
+    for name in state_files():
         (state / name).unlink(missing_ok=True)
 
 
@@ -387,6 +431,9 @@ def status(args):
     record = load_record()
     print(f'install record: {state_dir() / native.VENDOR_IMAGE_RECORD}: ' +
           (f'{record["version"]}, gated on {record["kernel_module"]} ({record["gate"]["log_dir"]})' if record else 'none'))
+    if record:
+        print('hardware video decode: ' + (', '.join(record['media']['codecs']) if record['media']['hardware_decode']
+                                           else record['media']['reason']))
     print(f'vendor_ota = {w.get("vendor_ota")}, vendor_datetime = {w.get("vendor_datetime")}')
     try:
         dm = native.driver_mode(w)

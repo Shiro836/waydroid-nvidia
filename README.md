@@ -33,7 +33,8 @@ Please report problems as issues titled `[public-test] ...` ([what to include](d
 | Driver 470 and older | ❌ | ❌ | ❌ |
 
 Only the official Android 13 image (LineageOS 20) is supported. Hardware video decode (H.264, HEVC, VP9, AV1)
-works in the default mode on RTX 20 and newer.
+works in the default mode on RTX 20 and newer. On older GPUs the setup says so and Android's software decoders
+play video instead.
 
 You also need `nvidia-drm.modeset=1`, a Wayland desktop running on the NVIDIA GPU (tested on KDE Plasma 6), and
 the usual Waydroid kernel support (binder).

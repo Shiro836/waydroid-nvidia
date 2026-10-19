@@ -801,7 +801,7 @@ void Component::loop()
 
 /* ------------------------------------------------------------------ store */
 
-std::shared_ptr<Store> Store::Create(std::string *error)
+std::shared_ptr<Store> Store::Create(std::string *error, std::string *no_nvdec_gpu)
 {
     std::shared_ptr<Store> s(new Store());
     NvVideoDeviceInfo info{};
@@ -813,6 +813,10 @@ std::shared_ptr<Store> Store::Create(std::string *error)
     if (info.abi_version != NV_VIDEO_ABI_VERSION) {
         *error = "nv_video backend ABI " + std::to_string(info.abi_version) + ", this service was built for " +
                  std::to_string(NV_VIDEO_ABI_VERSION);
+        return nullptr;
+    }
+    if (info.nvdec_class == 0) {
+        *no_nvdec_gpu = info.name;
         return nullptr;
     }
     s->mEntries = supported_codecs(s->mDevice, error);

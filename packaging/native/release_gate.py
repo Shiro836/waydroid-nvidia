@@ -43,6 +43,9 @@ ABIS = {'android': ('lib64', 64, 'x86_64'), 'android32': ('lib', 32, 'x86')}
 RUNTIME_ROOTS = ('libcutils.so', 'libhardware.so', 'liblog.so', 'libsync.so', 'libnativewindow.so')
 BIONIC = ('libc.so', 'libm.so', 'libdl.so', 'libdl_android.so')
 CASE_TIMEOUT = 600
+# nvc2-xmlgen's exit status for a GPU without an NVDEC class the Codec2 decoder drives (before Turing): a
+# capability gap, not a failure (nvidia-prolapse/media/core/nvc2_caps.h kExitNoNvdec)
+XMLGEN_NO_NVDEC = 3
 REMEDY_BUNDLE = 'reinstall the package (Arch: pacman -S waydroid-nvidia-bin; other distros: packaging/install.sh)'
 
 
@@ -429,7 +432,9 @@ def media_case_image(gate, native, vendor_img):
     --check against the live caps), the service's ELF closure against vendor_img + the system image's VNDK apex
     and LL-NDK, the nv_video symbols it imports, device access for uid mediacodec. Returns the media record;
     its 'xml' is the generated file (the setup installs it and the LXC generator binds it over the image's
-    placeholder /odm/etc/media_codecs_c2.xml)."""
+    placeholder /odm/etc/media_codecs_c2.xml). A GPU without an NVDEC class the decoder drives (nvc2-xmlgen exit
+    XMLGEN_NO_NVDEC) passes with 'hardware_decode' False: its listing has no codecs, 'reason' says why, and every
+    other check still runs (the service still starts once on such a GPU)."""
     env, command = gate.command('android', [gate.progs / 'bin/android/nvc2-xmlgen'])
     record = {'exit': None, 'kernel_module': native.driver_version(), 'started': now(),
               'runner': 'packaging/native/release_gate.py (vendor image media gate)', 'steps': []}
@@ -438,7 +443,7 @@ def media_case_image(gate, native, vendor_img):
     xml = workdir / 'media_codecs_c2.xml'
     log = gate.work / 'logs' / 'media.log'
 
-    def step(name, cmd, env_extra=None):
+    def step(name, cmd, env_extra=None, ok=(0,)):
         print(f'[media/{name}]', flush=True)
         t0 = time.monotonic()
         proc = subprocess.run(list(map(str, cmd)), stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
@@ -446,11 +451,18 @@ def media_case_image(gate, native, vendor_img):
         with open(log, 'a') as f:
             f.write(f'$ {" ".join(map(str, cmd))}\n{proc.stdout}exit={proc.returncode}\n\n')
         record['steps'].append({'step': name, 'exit': proc.returncode, 'seconds': round(time.monotonic() - t0, 2)})
-        if proc.returncode != 0:
+        if proc.returncode not in ok:
             raise RuntimeError(f'media gate FAILED at {name} (exit {proc.returncode}); log {log}\n' + proc.stdout[-3000:])
-    step('xmlgen', [*command, '-o', xml], env)
-    step('validate-xml', ['python3', '-I', REPO / 'nvidia-prolapse/media/test/validate_xml.py', xml])
-    step('xmlgen-check', [*command, '--check', xml], env)
+        return proc
+    gen = step('xmlgen', [*command, '-o', xml], env, ok=(0, XMLGEN_NO_NVDEC))
+    hardware = gen.returncode == 0
+    reason = None
+    if not hardware:      # the tool's own line, for the user; the decision above is its exit status
+        reason = next((l.split('nvc2-xmlgen: ', 1)[1] for l in gen.stdout.splitlines() if 'nvc2-xmlgen: ' in l),
+                      f'hardware video decode: not available on this GPU (nvc2-xmlgen exit {XMLGEN_NO_NVDEC})')
+    step('validate-xml', ['python3', '-I', REPO / 'nvidia-prolapse/media/test/validate_xml.py',
+                          *([] if hardware else ['--no-decoders']), xml])
+    step('xmlgen-check', [*command, '--check', xml], env, ok=(0,) if hardware else (XMLGEN_NO_NVDEC,))
     if native.XMLGEN_MARK not in xml.read_text():
         raise RuntimeError(f'{xml} lacks the "{native.XMLGEN_MARK}" header')
     service = gate.payload / native.MEDIA_SERVICE           # byte-identical to the image's (checked by the caller)
@@ -479,7 +491,8 @@ def media_case_image(gate, native, vendor_img):
                                      [native.nvidia_render_node()])
     record.update(exit=0, finished=now(), log=str(log), closure={service.name: closure}, nv_video_symbols=sorted(want))
     return {'enabled': True, 'component': 'nvidia-prolapse/media Codec2 NVDEC decoder (vendor image)',
-            'xml': str(xml), 'xml_sha256': sha256(xml), 'codecs': media_codecs(xml), 'gate': record}
+            'xml': str(xml), 'xml_sha256': sha256(xml), 'codecs': media_codecs(xml), 'gate': record,
+            'hardware_decode': hardware, 'reason': reason}
 
 
 def media_codecs(xml):
@@ -549,5 +562,6 @@ def run(sn, native, bundle=BUNDLE, images=Path('/var/lib/waydroid/images'), log_
                           'cases': gl_cases_run, 'stripped': 'llvm-strip --strip-debug (CI, collect.py)',
                           'rust_sha256': rust_sha}}
     sources.update(odm)
-    print(f'Release gate PASS: {len(gate.cases)} cases + media on kernel module {kernel}', flush=True)
+    decode = '' if media.get('hardware_decode', True) else ' (media: no hardware decoder on this GPU)'
+    print(f'Release gate PASS: {len(gate.cases)} cases + media on kernel module {kernel}{decode}', flush=True)
     return record, vk, media, native_gl, sources

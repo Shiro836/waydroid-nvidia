@@ -5,6 +5,9 @@
  *   nvc2-xmlgen --check FILE    exit 0 iff FILE is exactly what this GPU produces now,
  *                               else name the difference and exit 1
  *
+ * A GPU without an NVDEC class this decoder drives (before Turing) exits 3 (kExitNoNvdec) instead
+ * of 0: the xml then lists no codecs and says why (no_decoder_xml), and --check compares against it.
+ *
  * Runs on the host (GNU build of the backend) when the guest tree is staged, and inside
  * the guest by the service at start (--check), so a GPU/driver change can never leave a
  * stale codec list behind silently.
@@ -42,19 +45,28 @@ int nvc2_xmlgen_main(int argc, char **argv)
         nv_video_device_close(dev);
         return 1;
     }
-    std::string err;
-    auto entries = nvc2::supported_codecs(dev, &err);
-    nv_video_device_close(dev);
-    if (!err.empty()) {
-        fprintf(stderr, "nvc2-xmlgen: %s\n", err.c_str());
-        return 1;
+    std::string xml;
+    int ok = 0;
+    if (info.nvdec_class == 0) {
+        nv_video_device_close(dev);
+        fprintf(stderr, "nvc2-xmlgen: %s\n", nvc2::no_decoder_reason(info.name).c_str());
+        xml = nvc2::no_decoder_xml(info.name);
+        ok = nvc2::kExitNoNvdec;
+    } else {
+        std::string err;
+        auto entries = nvc2::supported_codecs(dev, &err);
+        nv_video_device_close(dev);
+        if (!err.empty()) {
+            fprintf(stderr, "nvc2-xmlgen: %s\n", err.c_str());
+            return 1;
+        }
+        if (entries.empty()) {
+            fprintf(stderr, "nvc2-xmlgen: GPU %s (NVDEC class 0x%x) supports none of VP9/AV1/HEVC/H.264\n", info.name,
+                    info.nvdec_class);
+            return 1;
+        }
+        xml = nvc2::media_codecs_xml(entries);
     }
-    if (entries.empty()) {
-        fprintf(stderr, "nvc2-xmlgen: GPU %s (NVDEC class 0x%x) supports none of VP9/AV1/HEVC/H.264\n", info.name,
-                info.nvdec_class);
-        return 1;
-    }
-    const std::string xml = nvc2::media_codecs_xml(entries);
     if (check) {
         std::ifstream f(check);
         if (!f) {
@@ -68,7 +80,7 @@ int nvc2_xmlgen_main(int argc, char **argv)
                     info.name, xml.c_str());
             return 1;
         }
-        return 0;
+        return ok;
     }
     if (outpath) {
         std::ofstream f(outpath);
@@ -80,7 +92,7 @@ int nvc2_xmlgen_main(int argc, char **argv)
     } else {
         fputs(xml.c_str(), stdout);
     }
-    return 0;
+    return ok;
 }
 
 #ifndef NVC2_XMLGEN_NO_MAIN

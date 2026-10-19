@@ -41,7 +41,7 @@ int nv_video_device_open(NvVideoDevice **out, NvVideoDeviceInfo *info)
         memset(info, 0, sizeof(*info));
         info->abi_version = NV_VIDEO_ABI_VERSION;
         info->pci_vendor = 0x10de;
-        info->nvdec_class = 0xcfb0;
+        info->nvdec_class = g_stub.nvdec_class;
         info->nvdec_engines = 1;
         strcpy(info->name, "stub");
     }

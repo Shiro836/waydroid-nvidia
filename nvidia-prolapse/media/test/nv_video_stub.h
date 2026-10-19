@@ -7,6 +7,7 @@
 
 struct StubControl {
     NvVideoCaps caps[5]{};
+    uint32_t nvdec_class = 0xcfb0; /* 0: no NVDEC class the decoder drives (before Turing) */
     unsigned dpb_slots = 4;     /* + extra_output_slots = unreleased-picture limit */
     unsigned reorder_depth = 2; /* H.264/HEVC */
     bool device_lost = false;

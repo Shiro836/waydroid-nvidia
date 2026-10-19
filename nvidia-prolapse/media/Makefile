@@ -38,6 +38,7 @@ test: out/host/core_test out/host/xml_test
 	./out/host/core_test
 	./out/host/xml_test
 	python3 -I test/validate_xml.py out/host/media_codecs_c2.xml
+	python3 -I test/validate_xml.py --no-decoders out/host/media_codecs_c2.none.xml
 
 xmlgen: out/host/nvc2-xmlgen
 out/host/nvc2-xmlgen: $(CORE) $(HDRS) tools/nvc2_xmlgen.cpp Makefile

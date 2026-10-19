@@ -90,3 +90,25 @@ def test_channel_entry_rejects_other_shapes(tmp_path):
                                              'url': 'https://h/other.zip'}]}))
     with pytest.raises(RuntimeError, match='does not name a.zip'):
         vi.channel_entry(bad)
+
+
+def test_no_nvdec_files_come_from_the_image(tmp_path):
+    """GPU without hardware decode: the image's own service .rc gains `oneshot`, the VINTF fragment declares nothing."""
+    rc_src = REPO / 'nvidia-prolapse/media' / vi.native.MEDIA_RC
+    src = tmp_path / 'src'
+    (src / 'odm/etc/init').mkdir(parents=True)
+    (src / 'odm/etc/init' / rc_src.name).write_bytes(rc_src.read_bytes())
+    img = tmp_path / 'vendor.img'
+    subprocess.run(['mke2fs', '-q', '-F', '-t', 'ext4', '-d', str(src), str(img), '2M'], check=True, capture_output=True)
+    work = tmp_path / 'work'
+    work.mkdir()
+    files = vi.no_nvdec_files(img, work)
+    assert set(files) == set(vi.native.VENDOR_IMAGE_NO_NVDEC)
+    assert files[vi.native.MEDIA_RC].read_text() == vi.native.no_nvdec_rc(rc_src.read_text())
+    assert files[vi.native.MEDIA_VINTF].read_text() == vi.native.NO_NVDEC_VINTF_TEXT
+    assert sorted(p.name for p in work.iterdir()) == sorted(vi.native.VENDOR_IMAGE_NO_NVDEC.values())
+
+
+def test_state_files_cover_every_install_output():
+    assert set(vi.state_files()) == {vi.native.VENDOR_IMAGE_RECORD, vi.native.VENDOR_IMAGE_XML,
+                                     *vi.native.VENDOR_IMAGE_NO_NVDEC.values()}

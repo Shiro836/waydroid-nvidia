@@ -29,5 +29,13 @@ std::vector<CodecEntry> supported_codecs(NvVideoDevice *dev, std::string *error)
 /* media_codecs_c2.xml for exactly these entries (Codec2InfoBuilder format). */
 std::string media_codecs_xml(const std::vector<CodecEntry> &entries);
 
+/* A GPU without an NVDEC class this decoder drives (nv_video_device_open reports nvdec_class 0: anything before
+ * Turing) is a capability gap, not a failure. nvc2-xmlgen then writes/checks no_decoder_xml() and exits with
+ * kExitNoNvdec; the setup installs without hardware decode and the service only logs no_decoder_reason(). */
+constexpr int kExitNoNvdec = 3;
+std::string no_decoder_reason(const char *gpu_name);
+/* media_codecs_c2.xml for such a GPU: no codecs, the reason in its header. */
+std::string no_decoder_xml(const char *gpu_name);
+
 } // namespace nvc2
 #endif
