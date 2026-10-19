@@ -432,8 +432,8 @@ def status(args):
     print(f'install record: {state_dir() / native.VENDOR_IMAGE_RECORD}: ' +
           (f'{record["version"]}, gated on {record["kernel_module"]} ({record["gate"]["log_dir"]})' if record else 'none'))
     if record:
-        print('hardware video decode: ' + (', '.join(record['media']['codecs']) if record['media']['hardware_decode']
-                                           else record['media']['reason']))
+        print('hardware video decode: ' + ', '.join(record['media']['codecs']) if record['media']['hardware_decode']
+              else record['media']['reason'])
     print(f'vendor_ota = {w.get("vendor_ota")}, vendor_datetime = {w.get("vendor_datetime")}')
     try:
         dm = native.driver_mode(w)
