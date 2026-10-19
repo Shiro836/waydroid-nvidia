@@ -406,10 +406,38 @@ jobs:
           fi
           echo "waydroid patch and dual-ABI mounts validated at $WAYDROID_SHA"
 
+  selinux-policy:
+    name: SELinux policy module (packaging/selinux)
+    # Built on the oldest Fedora still supported: a module from a newer checkpolicy carries a policydb version the
+    # older libsepol refuses ("policydb module version 24 does not match my version range 4-23", Fedora 44 build on
+    # Fedora 43), while a Fedora 43 build links into Fedora 43, 44, 45 and rawhide policy stores.
+    runs-on: ubuntu-latest
+    container: registry.fedoraproject.org/fedora:43
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build waydroid.pp and link it into this release's policy store
+        run: |
+          dnf install -y --setopt=install_weak_deps=False --disablerepo=fedora-cisco-openh264 \
+            selinux-policy-devel selinux-policy-targeted container-selinux make
+          mkdir -p out && cp packaging/selinux/waydroid.te packaging/selinux/waydroid.fc out/
+          make -C out -f /usr/share/selinux/devel/Makefile waydroid.pp
+          # full link, expand and neverallow check against the targeted policy, without a kernel (-n)
+          semodule -n -X 400 -i out/waydroid.pp
+          semodule -lfull | grep -E '^400 waydroid +pp'
+          rpm -q selinux-policy container-selinux checkpolicy > out/BUILD-ENV.txt
+          sha256sum out/waydroid.pp | tee -a out/BUILD-ENV.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: selinux-policy
+          path: |
+            out/waydroid.pp
+            out/BUILD-ENV.txt
+
   release:
     name: release (tarballs + SHA256SUMS + provenance)
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [mesa, virglrenderer, gralloc, hwcomposer, angle, surfaceflinger, native, vendor-image, waydroid-patch-check]
+    needs: [mesa, virglrenderer, gralloc, hwcomposer, angle, surfaceflinger, native, vendor-image, waydroid-patch-check,
+            selinux-policy]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -501,7 +529,10 @@ jobs:
           cmp "$vimg/native-BUILD-RECORD.json" native/BUILD-RECORD.json
           python3 src/packaging/vendor-ota.py "$vimg/vendor.img" native/BUILD-RECORD.json out --tag "$TAG" \
             --repo "$GITHUB_REPOSITORY"
-          (cd out && sha256sum ./*.tar.zst ./*.zip ./*.json > SHA256SUMS)
+          # the waydroid SELinux policy module (install.sh loads it where SELinux is enabled)
+          cp artifacts/selinux-policy/waydroid.pp "out/waydroid-nvidia-selinux-${TAG}.pp"
+          cat artifacts/selinux-policy/BUILD-ENV.txt
+          (cd out && sha256sum ./*.tar.zst ./*.zip ./*.json ./*.pp > SHA256SUMS)
           cat out/SHA256SUMS
       - name: Attest build provenance
         id: attest
@@ -511,6 +542,7 @@ jobs:
             out/*.tar.zst
             out/*.zip
             out/*.json
+            out/*.pp
       - name: Attach the attestation as a Sigstore bundle per asset (verifiable without a GitHub login)
         env:
           GH_TOKEN: ${{ github.token }}
@@ -521,13 +553,13 @@ jobs:
           # --bundle` accept offline from GitHub's API
           test -s "$BUNDLE"
           cd out
-          subjects=$(ls ./*.tar.zst ./*.zip ./*.json)
+          subjects=$(ls ./*.tar.zst ./*.zip ./*.json ./*.pp)
           for f in $subjects; do
             cp "$BUNDLE" "$f.sigstore.json"
             gh attestation verify "$f" --bundle "$f.sigstore.json" --repo "$GITHUB_REPOSITORY" \
               --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/build.yml" >/dev/null
           done
-          sha256sum ./*.tar.zst ./*.zip ./*.json > SHA256SUMS
+          sha256sum ./*.tar.zst ./*.zip ./*.json ./*.pp > SHA256SUMS
           cat SHA256SUMS
       - name: Create release
         env:
@@ -547,4 +579,4 @@ jobs:
           } > notes.md
           gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --draft $PRE \
             --title "waydroid-nvidia $TAG" --notes-file notes.md \
-            out/*.tar.zst out/*.zip out/*.json out/SHA256SUMS
+            out/*.tar.zst out/*.zip out/*.json out/*.pp out/SHA256SUMS

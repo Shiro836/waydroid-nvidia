@@ -8,9 +8,10 @@
 #   sudo packaging/install.sh --uninstall
 #
 #   --tag TAG     release to install (default: the newest release, prereleases included)
-#   --from DIR    use release assets already in DIR (the four tarballs, the vendor image zip and channel JSON,
-#                 SHA256SUMS, and the source tarball waydroid-nvidia-<TAG>.tar.gz) instead of downloading them;
-#                 their <asset>.sigstore.json bundles, when present in DIR, are verified with cosign
+#   --from DIR    use release assets already in DIR (the four tarballs, the vendor image zip and channel JSON, the
+#                 SELinux module .pp, SHA256SUMS, and the source tarball waydroid-nvidia-<TAG>.tar.gz) instead of
+#                 downloading them; their <asset>.sigstore.json bundles, when present in DIR, are verified with
+#                 cosign
 #   --check       download and verify only; install nothing
 #   --no-deps     do not install distro packages (each required tool is still checked by name)
 #   --uninstall   put the official vendor image back (waydroid-nvidia-setup --restore-official-vendor), then
@@ -51,12 +52,28 @@ while [ $# -gt 0 ]; do
         --check) CHECK=1; shift ;;
         --no-deps) DEPS=0; shift ;;
         --uninstall) UNINSTALL=1; shift ;;
-        -h|--help) sed -n '2,27p' "$0" 2>/dev/null || true; exit 0 ;;
+        -h|--help) sed -n '2,30p' "$0" 2>/dev/null || true; exit 0 ;;
         *) die "unknown argument: $1 (--help)" ;;
     esac
 done
 [ "$(id -u)" = 0 ] || die "run as root (sudo)"
 [ "$(uname -m)" = x86_64 ] || die "only x86_64 hosts are supported"
+
+# ---------------------------------------------------------------- SELinux
+# Where SELinux is enabled, Waydroid runs confined by Fedora's policy for it (packaging/selinux, module "waydroid",
+# built by CI and shipped as the release asset waydroid-nvidia-selinux-<tag>.pp): without it an enforcing host denies
+# Android's service managers the binder context manager and the container never boots. Loaded at priority 400, above
+# the 200 a distribution package uses, so a leftover module of the distro's own waydroid package is shadowed rather
+# than duplicated; SEMODULE records that this script loaded it.
+SEMODULE=$STATE/selinux-module
+selinux_on() { command -v selinuxenabled >/dev/null 2>&1 && selinuxenabled; }
+relabel() {   # the paths waydroid.fc labels (its /var/lib/waydroid(.*)? also covers /var/lib/waydroid-nvidia), where they exist
+    local paths=() p
+    for p in /usr/lib/waydroid /var/lib/waydroid /var/lib/waydroid-nvidia /run/waydroid-*; do [ -e "$p" ] && paths+=("$p"); done
+    # -x: not into a mounted rootfs (a running container mounts its images under /var/lib/waydroid)
+    [ ${#paths[@]} -eq 0 ] || restorecon -R -x "${paths[@]}" ||
+        die "restorecon -R -x ${paths[*]} failed (see above); fix the labels with that command, then re-run"
+}
 
 # ---------------------------------------------------------------- uninstall
 if [ "$UNINSTALL" = 1 ]; then
@@ -76,6 +93,13 @@ if [ "$UNINSTALL" = 1 ]; then
     # empty directories the install created
     sort -r "$LIST" | while IFS= read -r f; do d=$(dirname -- "$f"); rmdir --ignore-fail-on-non-empty -p -- "$d" 2>/dev/null || true; done
     rm -f "$LIST"
+    if [ -f "$SEMODULE" ]; then
+        semodule -X 400 -r waydroid ||
+            die "semodule -X 400 -r waydroid failed (see above); remove the waydroid policy module with it, then re-run"
+        rm -f "$SEMODULE"
+        ! selinux_on || relabel
+        info "removed the waydroid SELinux policy module; Waydroid's data is relabelled"
+    fi
     systemctl daemon-reload 2>/dev/null || true
     systemctl reload dbus.service 2>/dev/null || systemctl reload dbus-broker.service 2>/dev/null || true
     info "removed $n files"
@@ -123,9 +147,11 @@ if [ "$DEPS" = 1 ] && [ "$CHECK" = 0 ]; then
             apt-get install -yq python3-gbinder || die "python3-gbinder is not available: add the Waydroid repository
 (curl -fsSL https://repo.waydro.id | sudo bash) and re-run" ;;
         fedora)
+            sepkgs=()
+            ! selinux_on || sepkgs=(container-selinux)   # the waydroid policy module requires its types
             dnf install -y lxc python3 python3-gobject python3-dbus python3-gbinder nftables dnsmasq gtk3 \
                 binutils e2fsprogs util-linux zstd curl git make patch \
-                libepoxy libdrm mesa-libgbm libX11 expat vulkan-loader ;;
+                libepoxy libdrm mesa-libgbm libX11 expat vulkan-loader "${sepkgs[@]}" ;;
         arch)
             # Install only what is missing: `pacman -S --needed` would also UPGRADE installed-but-older packages one
             # by one, a partial upgrade that breaks other packages (e.g. expat vs lib32-expat). Never upgrade here.
@@ -164,14 +190,26 @@ ASSETS=(waydroid-nvidia-host-x86_64-$TAG.tar.zst waydroid-nvidia-guest-android-x
         waydroid-nvidia-guest-prebuilts-$TAG.tar.zst waydroid-nvidia-native-x86_64-$TAG.tar.zst
         waydroid-nvidia-vendor-x86_64-$TAG.zip waydroid-nvidia-vendor-ota-$TAG.json)
 SRC_TAR=waydroid-nvidia-$TAG.tar.gz
+SEPP=waydroid-nvidia-selinux-$TAG.pp     # packaging/selinux built by CI; releases before it have none
+base=https://github.com/$GH_REPO/releases/download/$TAG
 if [ -n "$FROM" ]; then
-    for f in "${ASSETS[@]}" SHA256SUMS "$SRC_TAR"; do
+    [ -f "$FROM/SHA256SUMS" ] || die "$FROM/SHA256SUMS missing"; cp -- "$FROM/SHA256SUMS" "$WORK/"
+else
+    fetch "$base/SHA256SUMS" "$WORK/SHA256SUMS" || die "cannot download $base/SHA256SUMS"
+fi
+if grep -Eq " [ *]?(\./)?${SEPP//./\\.}\$" "$WORK/SHA256SUMS"; then
+    ASSETS+=("$SEPP")
+elif selinux_on && [ "$CHECK" = 0 ]; then
+    die "release $TAG ships no SELinux policy module ($SEPP), which Waydroid needs on this SELinux host.
+Install a newer release (--tag), or install on a host without SELinux"
+fi
+if [ -n "$FROM" ]; then
+    for f in "${ASSETS[@]}" "$SRC_TAR"; do
         [ -f "$FROM/$f" ] || die "$FROM/$f missing"; cp -- "$FROM/$f" "$WORK/$f"
     done
     for f in "${ASSETS[@]}"; do [ ! -f "$FROM/$f.sigstore.json" ] || cp -- "$FROM/$f.sigstore.json" "$WORK/"; done
 else
-    base=https://github.com/$GH_REPO/releases/download/$TAG
-    for f in "${ASSETS[@]}" SHA256SUMS; do info "downloading $f"; fetch "$base/$f" "$WORK/$f" || die "cannot download $base/$f"; done
+    for f in "${ASSETS[@]}"; do info "downloading $f"; fetch "$base/$f" "$WORK/$f" || die "cannot download $base/$f"; done
     # Sigstore attestation bundles (releases from v0.2.0-rc2 on): a missing one only means cosign cannot be used
     for f in "${ASSETS[@]}"; do fetch "$base/$f.sigstore.json" "$WORK/$f.sigstore.json" 2>/dev/null || rm -f "$WORK/$f.sigstore.json"; done
     fetch "https://github.com/$GH_REPO/archive/refs/tags/$TAG.tar.gz" "$WORK/$SRC_TAR" || die "cannot download the $TAG source"
@@ -306,6 +344,15 @@ fi
 # existing directories keep their owner, mode and times (--no-overwrite-dir)
 tar -C "$ROOT" -cf - . | tar -C / -xpf - --no-overwrite-dir --no-same-owner
 mkdir -p "$STATE" && cp "$WORK/files" "$LIST"
+if selinux_on; then
+    # semodule names a module after its file: install it as waydroid.pp
+    mkdir "$WORK/selinux" && cp "$WORK/$SEPP" "$WORK/selinux/waydroid.pp"
+    semodule -X 400 -i "$WORK/selinux/waydroid.pp" ||
+        die "semodule could not load the waydroid policy module (see above); without it an enforcing host refuses the container"
+    echo "waydroid 400" > "$SEMODULE"
+    relabel
+    info "SELinux: policy module waydroid loaded (priority 400); /usr/lib/waydroid, /var/lib/waydroid{,-nvidia} relabelled"
+fi
 systemd-tmpfiles --create /usr/lib/tmpfiles.d/waydroid-venus.conf 2>/dev/null || true
 # What a package manager's post-install hooks would do: the running services must see the new files.
 # Without the DBus reload the container manager's bus name is refused by the old policy and

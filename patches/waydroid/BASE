@@ -9,5 +9,8 @@ base-commit: a33a5c0  (Merge #2218 aidl-gralloc5)
 # lxc.py: lxc.apparmor.profile only when this host's LXC parses it (an LXC built
 #         without AppArmor, e.g. Fedora's, refuses the whole config); asked of
 #         lxc-info with a scratch container, never decided by distro name.
+# mount.py: the Android rootfs mounts get context=...waydroid_rootfs_t when the loaded
+#         SELinux policy defines it (the waydroid module, packaging/selinux, loaded by
+#         install.sh); libselinux decides (security_check_context).
 # waydroid-net.sh: where firewalld runs, waydroid0 joins its trusted zone
 #         (the container's DHCP/DNS; Fedora's own package does the same).

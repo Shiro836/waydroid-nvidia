@@ -949,6 +949,59 @@ class LxcAppArmorTest(unittest.TestCase):
         self.assertIn('Unsupported config key "lxc.no_such_key"', message)
 
 
+class MountSelinuxContextTest(unittest.TestCase):
+    """mount.py rootfs_context() (baseline patch): the Android rootfs is mounted with the waydroid policy's
+    waydroid_rootfs_t context only when libselinux says SELinux is enabled and the loaded policy defines it."""
+
+    def setUp(self):
+        import_tree()
+        import tools.helpers.mount as mount
+        self.mount = mount
+        mount.rootfs_context.cache_clear()
+        self.addCleanup(mount.rootfs_context.cache_clear)
+
+    def context(self, lib):
+        self.mount.rootfs_context.cache_clear()
+        with mock.patch("ctypes.CDLL", side_effect=lib if callable(lib) else (lambda *a, **k: lib)):
+            return self.mount.rootfs_context()
+
+    @staticmethod
+    def lib(enabled, valid):
+        return types.SimpleNamespace(is_selinux_enabled=lambda: enabled,
+                                     security_check_context=lambda ctx: 0 if valid else -1)
+
+    def test_no_libselinux_no_context(self):
+        def missing(*a, **k):
+            raise OSError("libselinux.so.1: cannot open shared object file")
+        self.assertIsNone(self.context(missing))
+
+    def test_selinux_disabled_no_context(self):
+        self.assertIsNone(self.context(self.lib(0, True)))
+
+    def test_policy_with_the_type(self):
+        self.assertEqual(self.context(self.lib(1, True)), "system_u:object_r:waydroid_rootfs_t:s0")
+
+    def test_policy_without_the_type_warns(self):
+        with self.assertLogs(level="WARNING") as logs:
+            self.assertIsNone(self.context(self.lib(1, False)))
+        self.assertIn("waydroid_rootfs_t", logs.output[0])
+        self.assertIn("install.sh", logs.output[0])
+
+    def test_mount_passes_the_context(self):
+        calls = []
+        args = types.SimpleNamespace()
+        for lib, want in ((self.lib(1, True), ['context="system_u:object_r:waydroid_rootfs_t:s0"', "ro"]),
+                          (self.lib(0, True), ["ro"])):
+            self.mount.rootfs_context.cache_clear()
+            calls.clear()
+            with mock.patch("ctypes.CDLL", lambda *a, **k: lib), \
+                    mock.patch.object(self.mount.tools.helpers.run, "user", lambda a, cmd, **k: calls.append(cmd)), \
+                    mock.patch.object(self.mount, "ismount", side_effect=[False, True]), \
+                    mock.patch.object(self.mount.os.path, "exists", lambda p: True):
+                self.mount.mount(args, "/img/system.img", "/rootfs", readonly=True)
+            self.assertEqual(calls, [["mount", "-o", ",".join(want), "/img/system.img", "/rootfs"]])
+
+
 class LxcIntegrationTest(FakeHostMixin, unittest.TestCase):
     """generate_nodes_lxc_config() / make_base_props() / start() of build/waydroid, every mode x GL."""
 

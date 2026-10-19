@@ -51,9 +51,10 @@ waydroid session start
 ```
 
 The installer verifies every download and will not overwrite files owned by a distro package, so remove an older
-`waydroid` or `waydroid-nvidia-bin` package first. `waydroid-nvidia-setup` checks your system, tests the driver on
-your GPU, and only then installs our Android vendor image. Your official vendor image is kept as a backup. If a
-check fails, it says why and leaves everything as it was.
+`waydroid` or `waydroid-nvidia-bin` package first. On SELinux hosts (Fedora) it also builds and loads Waydroid's
+SELinux policy module, the one Fedora's own `waydroid-selinux` package ships. `waydroid-nvidia-setup` checks your
+system, tests the driver on your GPU, and only then installs our Android vendor image. Your official vendor image is
+kept as a backup. If a check fails, it says why and leaves everything as it was.
 
 On a fresh install the setup runs `waydroid init` for you. For Google apps, use `sudo waydroid-nvidia-setup -s GAPPS`
 instead (the default is `VANILLA`, without them). On an existing install `-s` only checks the system type; to switch,

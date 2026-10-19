@@ -1,0 +1,10 @@
+# waydroid.fc: Fedora's SELinux policy for Waydroid, unchanged below this header.
+# Source: https://src.fedoraproject.org/rpms/waydroid/blob/rawhide/f/waydroid.fc
+#         dist-git commit 96738aadc1fed2dd9dc82af234fac167625b332c, fetched 2026-10-19.
+# License: MIT (the Fedora dist-git default for files that carry none of their own).
+# packaging/install.sh builds and loads it as module "waydroid" where SELinux is enabled.
+/usr/lib/waydroid/waydroid.py                       gen_context(system_u:object_r:waydroid_exec_t,s0)
+/usr/lib/waydroid/data/scripts/waydroid-net\.sh     gen_context(system_u:object_r:waydroid_net_exec_t,s0)
+/var/lib/waydroid(.*)?                              gen_context(system_u:object_r:waydroid_data_t,s0)
+/var/run/waydroid-(?!lxc).*                         gen_context(system_u:object_r:waydroid_var_run_t,s0)
+/run/waydroid-(?!lxc).*                             gen_context(system_u:object_r:waydroid_var_run_t,s0)
