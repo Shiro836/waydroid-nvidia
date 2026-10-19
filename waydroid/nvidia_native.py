@@ -1132,7 +1132,7 @@ def _check_source_rm_media(root, manifest):
                               "Restage: {}".format(root, name, vendor_img, name, MEDIA_STAGE))
 
 
-def check_media_device_access(paths):
+def check_media_device_access(paths, remedy=None):
     """The Codec2 service runs as uid mediacodec with groups camera/mediadrm/drmrpc/graphics. The
     container has no id map, so host owner/group never match those ids: every node the decoder
     opens must be a character device readable and writable by others."""
@@ -1145,9 +1145,19 @@ def check_media_device_access(paths):
                 path, e.strerror))
         if not st.S_ISCHR(s.st_mode) or s.st_mode & 0o006 != 0o006:
             raise OSError("NVIDIA native mode: {} is mode {:o}; the Codec2 NVDEC service (uid mediacodec, no "
-                          "host group) needs a character device with o+rw. Remedy: NVIDIA device files "
-                          "NVreg_DeviceFileMode=0666 (modprobe.d) / a udev rule for the render node, or "
-                          "restage with --no-media REASON".format(path, s.st_mode))
+                          "host group) needs a character device with o+rw. Remedy: {}".format(
+                              path, s.st_mode, remedy or "NVIDIA device files NVreg_DeviceFileMode=0666 (modprobe.d) "
+                              "/ a udev rule for the render node, or restage with --no-media REASON"))
+
+
+def media_device_nodes(dev=None):
+    """The NVIDIA character devices the Codec2 service opens whose mode the host keeps: /dev/nvidiactl and
+    /dev/nvidia<N> (NVreg_DeviceFileMode, 0666 by default). It opens the render node too, but that node's host
+    mode is the distro's (systemd's 50-udev-default.rules: 0660 before v258, 0666 after) until Waydroid makes
+    every /dev/dri/renderD* 0777 right before each container start (tools/actions/container_manager.py
+    set_permissions, then lxc.py start): check_start() checks it there, where it counts."""
+    dev = dev or DEV_DIR
+    return [os.path.join(dev, "nvidiactl")] + sorted(glob.glob(os.path.join(dev, "nvidia[0-9]*")))
 
 
 def _load_source_rm(root, formats):
@@ -1681,8 +1691,7 @@ def vendor_image_nodes(dm, waydroid, dev=None, existing=(), state=None):
     dev = dev or DEV_DIR
     record = check_vendor_image(dm, waydroid, state=state)
     devices = _device_nodes(dev, existing)
-    check_media_device_access([os.path.join(dev, "nvidiactl")] + sorted(glob.glob(os.path.join(dev, "nvidia[0-9]*")))
-                              + [nvidia_render_node()])
+    check_media_device_access(media_device_nodes(dev))
     no_nvdec = [] if record["media"]["hardware_decode"] else [
         "lxc.mount.entry = {} vendor/{} none bind,ro 0 0".format(os.path.join(state, name), target)
         for target, name in sorted(VENDOR_IMAGE_NO_NVDEC.items())]
@@ -1741,6 +1750,9 @@ def check_start(dm, waydroid, config_nodes, state=None):
     if not dm.vendor_image:
         return
     record = check_vendor_image(dm, waydroid, state=state)
+    check_media_device_access([nvidia_render_node()], remedy="Waydroid's container start makes every "
+                              "/dev/dri/renderD* 0777 just before this check (container_manager.py set_permissions); "
+                              "restart waydroid-container.service, and report it if the mode stays")
     try:
         with open(config_nodes) as f:
             lines = f.read().splitlines()

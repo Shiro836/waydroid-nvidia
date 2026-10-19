@@ -745,6 +745,9 @@ class DeviceAccessTest(unittest.TestCase):
         with mock.patch.object(nn.os, 'stat', return_value=fake):
             self.assertRaisesRegex(OSError, 'NVreg_DeviceFileMode', nn.check_media_device_access, ['/dev/nvidiactl'])
         self.assertRaisesRegex(OSError, 'missing', nn.check_media_device_access, ['/nonexistent/nvidiactl'])
+        with tempfile.NamedTemporaryFile() as f:
+            self.assertRaisesRegex(OSError, 'o\\+rw. Remedy: restart it', nn.check_media_device_access, [f.name],
+                                   remedy='restart it')
 
 
 class MediaClosureTest(unittest.TestCase):

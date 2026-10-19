@@ -1621,7 +1621,7 @@ class VendorImageTest(unittest.TestCase):
         for attr, value in (("VENDOR_IMAGE_STATE", self.state), ("DEV_DIR", self.dev),
                             ("PACKAGED_BUNDLE_RECORD", os.path.join(self.top, "no-package")),
                             ("driver_version", lambda *a: V), ("nvidia_render_node", lambda *a: RENDER),
-                            ("check_media_device_access", self.access.append)):
+                            ("check_media_device_access", lambda paths, remedy=None: self.access.append(paths))):
             p = mock.patch.object(nn, attr, value)
             p.start()
             self.addCleanup(p.stop)
@@ -1675,7 +1675,8 @@ class VendorImageTest(unittest.TestCase):
         self.assertEqual(sorted(e.split()[2] for e in nodes[:-1]),
                          sorted([os.path.join(self.dev, n) for n in ("nvidiactl", "nvidia-modeset", "nvidia0")] + [RENDER]))
         self.assertFalse([e for e in nodes if "vendor_extra" in e or "nv/guest" in e or "/egl" in e])
-        self.assertEqual(len(self.access), 1)          # the Codec2 service's device access
+        # the Codec2 service's device access: the NVIDIA nodes here, the render node at container start
+        self.assertEqual(self.access, [[os.path.join(self.dev, n) for n in ("nvidiactl", "nvidia0")]])
 
     def test_stock_image_refused_with_setup_remedy(self):
         make_vendor_img(self.img, STOCK_PROPS)
@@ -1833,6 +1834,19 @@ class VendorImageTest(unittest.TestCase):
             f.write("".join(e + "\n" for e in self.nodes()))
         nn.check_start(dm, self.cfg, config_nodes)
 
+    def test_render_node_access_is_checked_at_container_start(self):
+        """Waydroid makes /dev/dri/renderD* 0777 right before the start (container_manager.py set_permissions);
+        the setup runs before any start, where the distro's mode (0660 on systemd < 258) would refuse."""
+        dm = nn.driver_mode(self.cfg)
+        config_nodes = os.path.join(self.top, "config_nodes")
+        with open(config_nodes, "w") as f:
+            f.write("".join(e + "\n" for e in self.nodes()))
+        calls = []
+        with mock.patch.object(nn, "check_media_device_access", lambda paths, remedy=None: calls.append((paths, remedy))):
+            nn.check_start(dm, self.cfg, config_nodes)
+        self.assertEqual(calls[0][0], [RENDER])
+        self.assertIn("set_permissions", calls[0][1])
+
     def test_start_check(self):
         dm = nn.driver_mode(self.cfg)
         config_nodes = os.path.join(self.top, "config_nodes")
@@ -1863,7 +1877,7 @@ class VendorImageLxcTest(LxcIntegrationTest):
         self.vi = VendorImageTest("test_driver_mode")
         self.vi.setUp()
         self.addCleanup(self.vi.tearDown)
-        for attr, value in (("VENDOR_IMAGE_STATE", self.vi.state), ("check_media_device_access", lambda paths: None),
+        for attr, value in (("VENDOR_IMAGE_STATE", self.vi.state), ("check_media_device_access", lambda paths, remedy=None: None),
                             ("PACKAGED_BUNDLE_RECORD", os.path.join(self.top, "no-package")),
                             ("image_build_props", nn.image_build_props)):
             p = mock.patch.object(self.module, attr, value)

@@ -486,9 +486,7 @@ def media_case_image(gate, native, vendor_img):
     have = {x for x in nm(rust, '--defined-only') if x.startswith('nv_video_')}
     if not want or want - have:
         raise RuntimeError(f'{rust} lacks nv_video symbols the Codec2 service imports: {sorted(want - have) or "none imported"}')
-    native.check_media_device_access([native.DEV_DIR + '/nvidiactl'] +
-                                     sorted(str(p) for p in Path(native.DEV_DIR).glob('nvidia[0-9]*')) +
-                                     [native.nvidia_render_node()])
+    native.check_media_device_access(native.media_device_nodes())   # the render node: at every container start
     record.update(exit=0, finished=now(), log=str(log), closure={service.name: closure}, nv_video_symbols=sorted(want))
     return {'enabled': True, 'component': 'nvidia-prolapse/media Codec2 NVDEC decoder (vendor image)',
             'xml': str(xml), 'xml_sha256': sha256(xml), 'codecs': media_codecs(xml), 'gate': record,

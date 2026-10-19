@@ -217,7 +217,7 @@ exit {xmlgen_exit}
                                    MEDIA_SERVICE='odm/bin/hw/svc', DEV_DIR=str(tmp_path / 'dev'),
                                    image_ls=lambda img, d: {'/lib64': ['libvendor.so'], '/system/lib64': ['libc.so']}.get(d, []),
                                    nvidia_render_node=lambda: '/dev/dri/renderD128',
-                                   check_media_device_access=lambda paths: None)
+                                   check_media_device_access=lambda paths: None, media_device_nodes=lambda: [])
     real = subprocess.check_output
     monkeypatch.setattr(gate.subprocess, 'check_output', lambda argv, **kw: (
         'U nv_video_decode\n' if '--undefined-only' in argv else 'T nv_video_decode\n') if argv[0] == 'nm'
