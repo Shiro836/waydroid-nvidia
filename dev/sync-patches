@@ -26,6 +26,7 @@ fmt "$VIRGL_TREE" "$VIRGL_BASE" "$REPO/patches/virglrenderer"
 diffto "$VIRGL_TREE" "$REPO/patches/virglrenderer/0004-wip-gpu-alloc-and-global-priority.patch"
 cp "$VIRGL_TREE/vtest/vtest_gpu_alloc.c" "$REPO/src/virglrenderer-vtest/"
 cp "$VIRGL_TREE/vtest/vtest_gpu_alloc.h" "$REPO/src/virglrenderer-vtest/"
+[ -f "$VIRGL_TREE/vtest/vtest_alloc_formats.h" ] && cp "$VIRGL_TREE/vtest/vtest_alloc_formats.h" "$REPO/src/"
 
 say "hwcomposer: 0001-wip-nvidia-fixes (all uncommitted)"
 diffto "$HWC_TREE" "$REPO/patches/hwcomposer/0001-wip-nvidia-fixes.patch"

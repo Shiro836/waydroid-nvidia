@@ -56,7 +56,7 @@ static const char *rstr(VkResult r) {
         return "INVALID_DRM_MODIFIER_LAYOUT";
     case VK_ERROR_INITIALIZATION_FAILED: return "INITIALIZATION_FAILED";
     default: {
-        static char buf[32];
+        static __thread char buf[32];
         snprintf(buf, sizeof(buf), "VkResult(%d)", r);
         return buf;
     }}
@@ -90,6 +90,7 @@ int main(void) {
     IPROC(inst, vkGetPhysicalDeviceFormatProperties2);
     IPROC(inst, vkGetPhysicalDeviceImageFormatProperties2);
     IPROC(inst, vkGetPhysicalDeviceQueueFamilyProperties);
+    (void)vkGetPhysicalDeviceQueueFamilyProperties;
     IPROC(inst, vkCreateDevice);
     gdpa = (PFN_vkGetDeviceProcAddr)gipa(inst, "vkGetDeviceProcAddr");
 
@@ -134,6 +135,13 @@ int main(void) {
     modlist.pDrmFormatModifierProperties = mods;
     vkGetPhysicalDeviceFormatProperties2(pd, FMT, &fp2);
     printf("modifiers advertised: %u\n", modlist.drmFormatModifierCount);
+
+    IPROC(inst, vkGetPhysicalDeviceFeatures);
+    VkPhysicalDeviceFeatures feats;
+    vkGetPhysicalDeviceFeatures(pd, &feats);
+    printf("host feature textureCompressionETC2: %s (Venus %s compute shader emulation)\n",
+           feats.textureCompressionETC2 ? "YES" : "NO",
+           feats.textureCompressionETC2 ? "unneeded" : "requires");
 
     const char *want_exts[] = {
         "VK_KHR_external_memory_fd", "VK_EXT_external_memory_dma_buf",
