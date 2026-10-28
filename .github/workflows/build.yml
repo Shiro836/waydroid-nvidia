@@ -576,8 +576,8 @@ jobs:
         run: |
           TAG="${GITHUB_REF_NAME}"
           # every tag starts as a DRAFT (invisible to users and install.sh) until it passed an install +
-          # reboot test; publish with `gh release edit <tag> --draft=false`. rc tags are prereleases.
-          PRE=""; case "$TAG" in *-rc*) PRE="--prerelease" ;; esac
+          # reboot test; publish with `gh release edit <tag> --draft=false`. rc and dev tags are prereleases.
+          PRE=""; case "$TAG" in *-rc*|*-dev*) PRE="--prerelease" ;; esac
           # human-written notes, one file per tag; a tag without one does not get a release
           NOTES="src/release-notes/$TAG.md"   # this job checks the repo out into src/
           [ -s "$NOTES" ] || { echo "::error::$NOTES missing: write the release notes before tagging"; exit 1; }
