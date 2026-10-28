@@ -14,7 +14,7 @@
  * Only what an EGL driver and its tests touch is spelled out. The struct layouts are the vendor ABI
  * (an EGL driver receives these pointers from libEGL.so); the static asserts pin LP64 and ILP32.
  * native_handle_t and the gralloc usage bits come from the HAL's vendored headers
- * (nvidia-prolapse/hal/include/android/), shared with vulkan.nvidia.so.
+ * (the driver's hal/include/android/), shared with vulkan.nvidia.so.
  */
 #ifndef NVN_ANDROID_H
 #define NVN_ANDROID_H

@@ -9,7 +9,7 @@ the driver on your GPU and prints the reason and the fix when something is wrong
 sudo waydroid shell dumpsys SurfaceFlinger | grep GLES
 ```
 
-This should name your NVIDIA GPU. With `--native-gl on` it shows `waydroid-nvidia-prolapse (nvrm)`.
+This should name your NVIDIA GPU. With `--native-gl on` it shows `nvidia-prolapse (nvrm)`.
 
 Two status reports list every check with PASS or FAIL:
 

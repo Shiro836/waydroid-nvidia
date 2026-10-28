@@ -6,14 +6,16 @@
 #   tools/host-window-stress.sh --platform-lib out/host-amplify/libnvnative-egl-android.so --consumer vk-write \
 #       --runs 5000 --jobs 6 [--process in|sep|mix] [--logdir DIR] [--front LIB] [--vk-hal LIB] [-- extra arguments]
 # --front / --vk-hal: the libraries under test (default: this tree's out/host/libEGL_nvnative.so and
-#            ../hal/out/host/vulkan.nvidia.so); point them at older builds to check that the harness still detects D1.
+#            <driver checkout>/hal/out/host/vulkan.nvidia.so); point them at older builds to check that the harness still
+#            detects D1. The driver checkout: ../../tools/driver_source.py path.
 # --process: in = consumer thread in the producer's process, sep = exec'd consumer process (--consumer-process),
 #            mix (default) = odd runs in-process, even runs separate process.
 # Output: one summary line; the full log of every failed run in LOGDIR (default: a mktemp directory, printed).
 set -u
 here=$(cd "$(dirname "$0")/.." && pwd)
+driver=$(python3 "$here/../../tools/driver_source.py" path)
 plat="" consumer="gl-write" runs=100 jobs=4 process=mix logdir="" extra=()
-front=out/host/libEGL_nvnative.so vkhal=../hal/out/host/vulkan.nvidia.so
+front=out/host/libEGL_nvnative.so vkhal=$driver/hal/out/host/vulkan.nvidia.so
 while [ $# -gt 0 ]; do
     case "$1" in
     --platform-lib) plat=$2; shift 2 ;;
@@ -34,7 +36,7 @@ mkdir -p "$logdir"
 plat=$(realpath "$plat")
 front=$(cd "$here" && realpath "$front")
 vkhal=$(cd "$here" && realpath "$vkhal")
-export HWS_HERE=$here HWS_PLAT=$plat HWS_FRONT=$front HWS_VKHAL=$vkhal HWS_CONSUMER=$consumer HWS_PROCESS=$process HWS_LOGDIR=$logdir
+export HWS_HERE=$here HWS_DRIVER=$driver HWS_PLAT=$plat HWS_FRONT=$front HWS_VKHAL=$vkhal HWS_CONSUMER=$consumer HWS_PROCESS=$process HWS_LOGDIR=$logdir
 export HWS_EXTRA="${extra[*]:-}"
 export DISPLAY= WAYLAND_DISPLAY= LSAN_OPTIONS=suppressions=$here/test/lsan.supp
 
@@ -46,7 +48,7 @@ run_one() {
     esac
     local out rc
     # shellcheck disable=SC2086
-    out=$(cd "$HWS_HERE" && timeout 300 ./out/host/host-window --gralloc ../gralloc/out/host/libgbm_mesa_wrapper.so \
+    out=$(cd "$HWS_HERE" && timeout 300 ./out/host/host-window --gralloc "$HWS_DRIVER"/gralloc/out/host/libgbm_mesa_wrapper.so \
         --front "$HWS_FRONT" --platform-lib "$HWS_PLAT" --consumer "$HWS_CONSUMER" \
         --vk-hal "$HWS_VKHAL" "${proc[@]}" $HWS_EXTRA 2>&1)
     rc=$?

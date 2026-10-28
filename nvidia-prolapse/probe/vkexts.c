@@ -19,7 +19,7 @@
 #include <stdint.h>
 #include <dlfcn.h>
 #include <vulkan/vulkan.h>
-#include <hardware/hwvulkan.h> /* pinned AOSP copy: ../hal/include/android */
+#include <hardware/hwvulkan.h> /* pinned AOSP copy: the driver repository's hal/include/android */
 
 typedef PFN_vkVoidFunction (*PFN_vk_icdGetInstanceProcAddr)(VkInstance, const char *);
 typedef VkResult (*PFN_vk_icdNegotiateLoaderICDInterfaceVersion)(uint32_t *);

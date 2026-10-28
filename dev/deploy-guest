@@ -5,6 +5,7 @@
 # the shim build outputs (shim/out), nvprobe + nvprobe.sh, and the host glibc version string.
 set -euo pipefail
 NVP=$(cd "$(dirname "$(readlink -f "$0")")/../nvidia-prolapse" && pwd)   # the nvidia-prolapse sub-project
+DRIVER=$(python3 "$NVP/../tools/driver_source.py" path)   # the driver checkout (its hal/ tests)
 # Waydroid user data of the invoking user (sudo keeps SUDO_USER); override with WAYDROID_DATA=.
 DATA=${WAYDROID_DATA:-$(getent passwd "${SUDO_USER:-$(id -un)}" | cut -d: -f6)/.local/share/waydroid/data}
 D=$DATA/local/tmp/nvp
@@ -41,10 +42,10 @@ for f in eglgles:eglgles-android eglgles32:eglgles-android32; do
 done
 # HAL test for duplicate ppEnabledExtensionNames (hal/test/ext-duplicates.c): --hal vulkan.nvidia.so --sphal,
 # --icd libEGL_nvidia.so.0 --sphal, or --loader libvulkan.so; run with LIBC_DEBUG_MALLOC_OPTIONS="guard backtrace=8".
-[ -e "$NVP/hal/out/android/ext-duplicates" ] || { echo "deploy-guest: $NVP/hal/out/android/ext-duplicates missing (make -C nvidia-prolapse/hal android)" >&2; exit 1; }
-cp -f "$NVP/hal/out/android/ext-duplicates" "$T/ext-duplicates"
-[ -e "$NVP/hal/out/android32/ext-duplicates" ] || { echo "deploy-guest: $NVP/hal/out/android32/ext-duplicates missing (make -C nvidia-prolapse/hal android32)" >&2; exit 1; }
-cp -f "$NVP/hal/out/android32/ext-duplicates" "$T/ext-duplicates32"
+[ -e "$DRIVER/hal/out/android/ext-duplicates" ] || { echo "deploy-guest: $DRIVER/hal/out/android/ext-duplicates missing (make -C $DRIVER/hal android)" >&2; exit 1; }
+cp -f "$DRIVER/hal/out/android/ext-duplicates" "$T/ext-duplicates"
+[ -e "$DRIVER/hal/out/android32/ext-duplicates" ] || { echo "deploy-guest: $DRIVER/hal/out/android32/ext-duplicates missing (make -C $DRIVER/hal android32)" >&2; exit 1; }
+cp -f "$DRIVER/hal/out/android32/ext-duplicates" "$T/ext-duplicates32"
 chown -R root:root "$DATA/local/tests"; chmod -R a+rX "$DATA/local/tests"; chmod 755 "$T"/*
 getconf GNU_LIBC_VERSION | awk '{print $2}' > "$D/host-glibc-version"
 chown -R root:root "$D"; chmod -R a+rX "$D"; chmod 755 "$D"/bin/*

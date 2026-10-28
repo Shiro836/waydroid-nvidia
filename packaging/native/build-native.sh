@@ -5,11 +5,16 @@
 # per-target logs (default build/native-logs/<time>).
 # One recipe for CI (.github/workflows/build.yml job "native", self-hosted runner) and developers.
 #
-#   packaging/native/build-native.sh [OUT_DIR]       default OUT_DIR=build/native-release
+#   packaging/native/build-native.sh [--driver-src DIR] [OUT_DIR]       default OUT_DIR=build/native-release
 #
-# Everything is pinned in the component recipes (hwcomposer/pins.env, native/mesa/build.py PIN,
-# nvidia-prolapse/*/Makefile, media/vndk/build.sh); this script only sequences them. Rust profile:
-# release. Network is needed on the first run (pinned downloads, checksum-verified by each recipe).
+# The driver (NVK over the Rust RM backend, nvrm, the Vulkan HAL, gralloc, Codec2, bionic libdrm) is the
+# driver repository github.com/Shiro836/nvidia-prolapse at the commit vendor-image/pins.env pins
+# (NVIDIA_PROLAPSE_REF), fetched and verified into build/nvidia-prolapse-src by tools/driver_source.py and
+# built by its own ./build.sh. --driver-src DIR (or NVIDIA_PROLAPSE_SRC=DIR) builds a local checkout
+# instead; its commit and dirty flag go into BUILD-RECORD.json.
+# Everything else is pinned in the component recipes (hwcomposer/pins.env, nvidia-prolapse/*/Makefile);
+# this script only sequences them. Rust profile: release. Network is needed on the first run (pinned
+# downloads, checksum-verified by each recipe).
 #
 # It runs in the build-environment container packaging/native/Containerfile (pinned base digest, Arch
 # Linux Archive snapshot, Rust toolchain): started on the host, it builds or reuses that image (tagged with
@@ -20,16 +25,19 @@
 # (a developer machine with every tool installed); a missing tool then fails by name.
 set -euo pipefail
 REPO=$(cd "$(dirname "$(readlink -f "$0")")/../.." && pwd)
-OUT=$(realpath -m -- "${1:-$REPO/build/native-release}")
-NATIVE=$REPO/nvidia-prolapse/driver-source/native
 PY=${PYTHON:-python3}
 say() { printf '\n== %s\n' "$*"; }
 die() { echo "build-native: $*" >&2; exit 1; }
-# every pinned download goes through tools/fetch.py (mirrors, retries with backoff, verified before kept);
-# network commands (git fetch, cargo) through its `retry`
-net() { "$PY" "$REPO/tools/fetch.py" retry -- "$@"; }
+if [ "${1:-}" = --driver-src ]; then
+    [ -n "${2:-}" ] || die "--driver-src needs a driver checkout"
+    NVIDIA_PROLAPSE_SRC=$(realpath -- "$2") || die "--driver-src $2: no such directory"
+    export NVIDIA_PROLAPSE_SRC
+    shift 2
+fi
+OUT=$(realpath -m -- "${1:-$REPO/build/native-release}")
+# every pinned download goes through tools/fetch.py (mirrors, retries with backoff, verified before kept)
 cd "$REPO"
-# NDK r30: the Vulkan HAL's Vulkan 1.4 headers (native/mesa/build-hal*.py use /opt/android-ndk)
+# NDK r30: the Vulkan HAL's Vulkan 1.4 headers (the driver's hal/build-nvk*.py use /opt/android-ndk)
 NDK_R30_URL=https://dl.google.com/android/repository/android-ndk-r30-linux.zip
 NDK_R30_SHA256=753611f410d002cfcd3f3dc2ef49aad532089d3180b436c060a90bf0fcb64df2
 
@@ -52,10 +60,17 @@ if [ -z "${NATIVE_BUILDENV:-}" ]; then
     # a git worktree keeps its object store elsewhere (collect.py records the commit)
     common=$(cd "$REPO" && realpath -- "$(git rev-parse --git-common-dir)")
     case "$common/" in "$REPO"/*) ;; *) mounts+=(-v "$common:$common:ro") ;; esac
+    # a local driver checkout (--driver-src) outside the checkout: mounted read-write (its build/ and out/ dirs),
+    # its object store read-only when it is a git worktree
+    if [ -n "${NVIDIA_PROLAPSE_SRC:-}" ]; then
+        case "$NVIDIA_PROLAPSE_SRC/" in "$REPO"/*) ;; *) mounts+=(-v "$NVIDIA_PROLAPSE_SRC:$NVIDIA_PROLAPSE_SRC") ;; esac
+        dcommon=$(cd "$NVIDIA_PROLAPSE_SRC" && realpath -- "$(git rev-parse --git-common-dir)")
+        case "$dcommon/" in "$NVIDIA_PROLAPSE_SRC"/*|"$REPO"/*) ;; *) mounts+=(-v "$dcommon:$dcommon:ro") ;; esac
+    fi
     say "running in $IMAGE as $(id -un)"
     exec docker run --rm --init --user "$(id -u):$(id -g)" "${mounts[@]}" -w "$REPO" \
         -e HOME="$REPO/build/.buildenv-home" -e CARGO_HOME="$REPO/build/.buildenv-home/cargo" \
-        -e NATIVE_BUILDENV="$IMAGE" -e NATIVE_BUILDENV_FILE_SHA256="$(sha256sum "$BUILDENV_FILE" | cut -d' ' -f1)" \
+        -e NVIDIA_PROLAPSE_SRC="${NVIDIA_PROLAPSE_SRC:-}" -e NATIVE_BUILDENV="$IMAGE" -e NATIVE_BUILDENV_FILE_SHA256="$(sha256sum "$BUILDENV_FILE" | cut -d' ' -f1)" \
         -e RELEASE_TAG="${RELEASE_TAG:-}" -e NATIVE_PARALLEL="${NATIVE_PARALLEL:-1}" \
         -e NATIVE_JOBS="${NATIVE_JOBS:-}" -e NATIVE_LOG_DIR="${NATIVE_LOG_DIR:-}" -e NATIVE_CCACHE="${NATIVE_CCACHE:-1}" \
         -e CCACHE_MAXSIZE="${CCACHE_MAXSIZE:-20G}" -e TERM=dumb "$IMAGE" \
@@ -89,8 +104,8 @@ for tool in git curl unzip debugfs meson ninja cmake cc c++ cargo rustup glslang
 done
 [ ${#missing[@]} -eq 0 ] || die "missing tools: ${missing[*]}"
 "$PY" -c 'import mako' 2>/dev/null || die "python mako missing (pip/pacman: python-mako)"
-# the Vulkan HAL needs the Vulkan 1.4 headers of NDK r30 (native/mesa/build-hal.py); the rest uses the
-# r29 that hwcomposer/provision.sh fetches
+# the Vulkan HAL needs the Vulkan 1.4 headers of NDK r30 (the driver's hal/build-nvk.py); the rest uses
+# the r29 that hwcomposer/provision.sh and the driver's android/provision.sh fetch
 [ -x /opt/android-ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/x86_64-linux-android33-clang ] \
     || die "Android NDK r30 missing at /opt/android-ndk (the Vulkan HAL build uses it)"
 # llvmpipe references for the GL gate (build-gate.py): host Mesa EGL through glvnd
@@ -99,27 +114,24 @@ for t in x86_64-linux-android i686-linux-android; do
     rustup target list --installed | grep -qx "$t" || die "rust target $t missing: rustup target add $t"
 done
 
+say "the driver: github.com/Shiro836/nvidia-prolapse"
+if [ -n "${NVIDIA_PROLAPSE_SRC:-}" ]; then
+    DRIVER=$("$PY" tools/driver_source.py path)
+else
+    DRIVER=$("$PY" tools/driver_source.py fetch) || die "fetching the pinned driver failed (vendor-image/pins.env NVIDIA_PROLAPSE_REF)"
+fi
+"$PY" tools/driver_source.py identity
+if [ "$NATIVE_BUILDENV" != host ]; then
+    # the image's one read-only toolchain must be the one the driver pins (rustup cannot install another here)
+    want=$(sed -n 's/^channel *= *"\(.*\)"$/\1/p' "$DRIVER/rust-toolchain.toml")
+    have=$(rustc +"$want" --version 2>/dev/null | cut -d' ' -f2 || true)
+    [ -n "$want" ] && [ "$have" = "$want" ] || die "the driver pins Rust $want (rust-toolchain.toml), the build image has $(rustc --version): set RUST_VERSION=$want in packaging/native/Containerfile"
+fi
+
 say "hwcomposer toolchain + deps (NDK r29, AOSP headers, image link stubs)"
 hwcomposer/provision.sh
 
-say "Mesa object store build/mesa-git (worktrees are taken from it at the pins)"
-MESA_URL=https://gitlab.freedesktop.org/mesa/mesa.git
-NVK_PIN=$(sed -n 's/^PIN = "\([0-9a-f]\{40\}\)".*/\1/p' "$NATIVE/mesa/build.py")
-HAL_PIN=$(sed -n 's/^MESA_SHA := \([0-9a-f]\{40\}\)$/\1/p' nvidia-prolapse/hal/Makefile)
-GRALLOC_PIN=$(sed -n 's/^MESA_REV *:= \([0-9a-f]\{40\}\)$/\1/p' nvidia-prolapse/gralloc/Makefile)
-[ -n "$NVK_PIN" ] && [ -n "$HAL_PIN" ] && [ -n "$GRALLOC_PIN" ] || die "could not read the Mesa pins"
-[ -d build/mesa-git/.git ] || git init -q build/mesa-git
-for pin in "$NVK_PIN" "$HAL_PIN" "$GRALLOC_PIN"; do
-    git -C build/mesa-git cat-file -e "$pin^{commit}" 2>/dev/null || net git -C build/mesa-git fetch -q "$MESA_URL" "$pin"
-done
-
-say "bionic libdrm (both ABIs)"
-# the blob census belongs to glibc-shim mode (NVIDIA's blobs call libdrm); here NVK, nvrm and gralloc do
-CENSUS="nvidia-prolapse build: no NVIDIA userspace loads this libdrm"
-make -C nvidia-prolapse/libdrm NO_BLOB_CENSUS="$CENSUS"
-make -C nvidia-prolapse/libdrm ARCH=x86 NO_BLOB_CENSUS="$CENSUS"
-
-say "Android runtime closure for the 32-bit host tests (read-only from the pinned image)"
+say "system/vendor images (read-only: link stubs, runtime closures)"
 # the image hwcomposer/provision.sh extracted its link stubs from: the pinned OTA download, or the
 # local Waydroid images it preferred ($HWC_IMAGES / waydroid.cfg images_path)
 SYSIMG=$(ls build/hwcomposer-work/deps/dl/system-img/*.img 2>/dev/null || true)
@@ -140,20 +152,19 @@ elif [ -z "$SYSIMG" ] || [ -z "$VENIMG" ]; then   # container: the pinned OTA im
     SYSIMG=$(ls $dl/system-img/*.img) VENIMG=$(ls $dl/vendor-img/*.img)
 fi
 [ -n "$SYSIMG" ] && [ -r "$SYSIMG" ] && [ -r "$VENIMG" ] || die "no system/vendor image: neither the pinned OTA download nor local Waydroid images (HWC_IMAGES)"
-# absolute: sub-builds run from their own directories (make -C nvidia-prolapse/gralloc dumps link stubs from them)
+# absolute: sub-builds run from their own directories (the driver's gralloc make dumps link stubs from them)
 SYSIMG=$(realpath -- "$SYSIMG") VENIMG=$(realpath -- "$VENIMG")
-export WAYDROID_SYSTEM_IMG=$SYSIMG WAYDROID_VENDOR_IMG=$VENIMG    # media/vndk/build.sh reads these
-"$PY" "$NATIVE/mesa/prepare-runtime32.py" --image "$SYSIMG"
+# the driver's android/provision.sh reads the same images (ANDROID_IMAGES = a directory with both)
+mkdir -p build/driver-images
+ln -sfn "$SYSIMG" build/driver-images/system.img
+ln -sfn "$VENIMG" build/driver-images/vendor.img
+export ANDROID_IMAGES=$REPO/build/driver-images
 
 # ---------------------------------------------------------------- the targets, concurrently where independent
 # Dependencies (everything else runs side by side):
-#   nak-tools (bindgen/cbindgen) -> nak, nvk-host;  nvk-host -> nvk-android, nvk-android32, gl-prepare  (one Mesa worktree each for NVK and nvrm:
-#          prepared once, then the targets build from it with --skip-prepare)
-#   nvk-android + gl-prepare -> nvrm-android;  nvk-android32 + gl-prepare -> nvrm-android32  (nvrm links the
-#          libnv_bionic_native.so of its ABI's NVK build)
-#   nvk-android + media -> media-service  (the Codec2 service links the x86_64 backend)
-#   hwcomposer, hal (-> HAL tests), gralloc (-> minigbm), media: only the steps above this section
-#   gralloc (minigbm) -> glibc-shim (shims, the HAL over NVIDIA's ICD, gralloc backend, EGL front)
+#   driver (the driver repository's ./build.sh: NVK + Rust RM, nvrm, HAL, gralloc + minigbm, Codec2, bionic libdrm)
+#   hwcomposer: only the steps above this section
+#   driver -> glibc-shim (shims, the HAL over NVIDIA's ICD, gralloc backend, EGL front, libdrm census)
 #   everything -> gate programs -> collect
 # Each target logs to $LOGS/<target>.log; a failure names the target, prints the end of its log and stops
 # the others. NATIVE_PARALLEL=0 runs the same targets one at a time, in declaration order. Each ninja keeps its -j
@@ -214,50 +225,27 @@ run_targets() {   # start every target whose dependencies are done; the first fa
     done
 }
 
-rel() { "$PY" "$@" --rust-profile release; }
-t_nak_tools()  { "$PY" "$NATIVE/compiler/build.py" --tools-only --download-deps; }
-t_nak()        { "$PY" "$NATIVE/compiler/build.py" --target both --download-deps -j "$JOBS"; }
-t_nvk_host()   { rel "$NATIVE/mesa/build.py" --target host --download-deps -j "$JOBS"; }   # also prepares the NVK worktree
-t_nvk()        { rel "$NATIVE/mesa/build.py" --target "$1" --download-deps --skip-prepare -j "$JOBS"; }
-t_gl_prepare() { PROLAPSE_ROOT=$REPO rel "$NATIVE/mesa/build.py" --gl --prepare-only --download-deps; }
-t_nvrm()       { PROLAPSE_ROOT=$REPO rel "$NATIVE/mesa/build.py" --gl --target "$1" --skip-prepare -j "$JOBS"; }
+t_driver()     { JOBS=$JOBS "$DRIVER/build.sh"; }
 t_hwcomposer() { hwcomposer/build.sh; }
-t_hal()        { "$PY" "$NATIVE/mesa/build-hal.py"; "$PY" "$NATIVE/mesa/build-hal-tests.py"; }
-t_gralloc()    { "$PY" "$NATIVE/mesa/build-gralloc.py" --target all
-                 make -C nvidia-prolapse/gralloc minigbm-fetch
-                 make -C nvidia-prolapse/gralloc minigbm SYSTEM_IMG="$SYSIMG" VENDOR_IMG="$VENIMG"; }
 # glibc-shim mode (NVIDIA's own userspace from the user's host through our glibc-compat shims): the guest side only.
 # The shims are cut from the per-branch reference import lists (nvidia-prolapse/shim/imports): no NVIDIA driver here.
+# The HAL and gralloc backend over NVIDIA's ICD are the driver repository's hal/ and gralloc/ glibc-shim targets;
+# the libdrm they and NVIDIA's blobs load is the driver's, checked here for the blobs (shim/libdrm-census).
 t_glibc_shim() { local why="release build: the builder has no NVIDIA driver; the per-branch reference lists are the census"
                  make -C nvidia-prolapse/shim REFERENCE_ONLY="$why"
                  make -C nvidia-prolapse/shim ARCH=x86 REFERENCE_ONLY="$why"
-                 make -C nvidia-prolapse/hal android android32
-                 make -C nvidia-prolapse/gralloc android android32 check check-minigbm SYSTEM_IMG="$SYSIMG" VENDOR_IMG="$VENIMG"
-                 make -C nvidia-prolapse/egl sources
-                 make -C nvidia-prolapse/egl android android32 check; }
-t_media()      { nvidia-prolapse/media/vndk/build.sh; make -C nvidia-prolapse/media test; }
-t_media_svc()  { NV_VIDEO_LIB_DIR=$(dirname "$("$PY" -c "import sys; sys.path.insert(0, 'tools'); import native_rust_profile as p; print(p.rust_library(__import__('pathlib').Path('$REPO'), 'android', 'release'))")") \
-                     nvidia-prolapse/media/vndk/build.sh service; }
+                 make -C nvidia-prolapse/shim/libdrm-census DRIVER="$DRIVER" NO_BLOB_CENSUS="$why"
+                 make -C nvidia-prolapse/shim/libdrm-census DRIVER="$DRIVER" ARCH=x86 NO_BLOB_CENSUS="$why"
+                 make -C "$DRIVER/hal" android android32
+                 make -C "$DRIVER/gralloc" android android32 check check-minigbm SYSTEM_IMG="$SYSIMG" VENDOR_IMG="$VENIMG"
+                 make -C nvidia-prolapse/egl sources DRIVER="$DRIVER"
+                 make -C nvidia-prolapse/egl android android32 check DRIVER="$DRIVER"; }
 
 say "targets ($([ "$PARALLEL" = 1 ] && echo concurrent || echo one at a time); ninja -j $JOBS -l $NINJA_LOAD; logs in $LOGS)"
-# the Rust RM builds --offline: fill CARGO_HOME's registry from Cargo.lock (checksummed) first
-net cargo fetch --locked --manifest-path "$NATIVE/Cargo.toml"
-target nak-tools      ""                         t_nak_tools
-target nak            "nak-tools"                t_nak
-target nvk-host       "nak-tools"                t_nvk_host
-target nvk-android    "nvk-host"                 t_nvk android
-target nvk-android32  "nvk-host"                 t_nvk android32
-target gl-prepare     "nvk-host"                 t_gl_prepare
-target nvrm-android   "nvk-android gl-prepare"   t_nvrm android
-target nvrm-android32 "nvk-android32 gl-prepare" t_nvrm android32
+target driver         ""                         t_driver
 target hwcomposer     ""                         t_hwcomposer
-target hal            ""                         t_hal
-target gralloc        ""                         t_gralloc
-target media          ""                         t_media
-target glibc-shim     "gralloc"                  t_glibc_shim
-target media-service  "media nvk-android"        t_media_svc
-target gate           "nvrm-android nvrm-android32 hal media-service glibc-shim" \
-                      "$PY" packaging/native/build-gate.py "$REPO/build/native-gate"
+target glibc-shim     "driver"                   t_glibc_shim
+target gate           "driver glibc-shim"        "$PY" packaging/native/build-gate.py "$REPO/build/native-gate"
 run_targets
 
 say "collect the release bundle"

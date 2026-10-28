@@ -43,7 +43,7 @@ $(foreach l,EGL GLESv1_CM GLESv2,\
   $(eval $(call nvp-prebuilt-lib,nvprolapse_lib$(l)_angle,lib$(l)_angle.so,egl,$(NVP_ANGLE)/vendor/%LIB%/egl/lib$(l)_angle.so,lib$(l)_angle)))
 $(eval $(call nvp-prebuilt-lib,nvprolapse_libgbm_mesa_wrapper,libgbm_mesa_wrapper.so,,$(NVP_NATIVE)/vendor_extra/%LIB%/libgbm_mesa_wrapper.so,libgbm_mesa_wrapper))
 
-# Codec2 NVDEC service (binary from the bundle; rc/VINTF/seccomp from nvidia-prolapse/media/odm/etc, copied to
+# Codec2 NVDEC service (binary from the bundle; rc/VINTF/seccomp from the bundle's driver/media/odm/etc, copied to
 # prebuilts/media by the product stage). Its HIDL/Codec2 runtime libraries are the tree's vendor variants (installed to
 # /vendor/lib64 via LOCAL_REQUIRED_MODULES), not the bundle's standalone builds.
 include $(CLEAR_VARS)

@@ -9,12 +9,12 @@
 #   - libEGL_nvidia.so.0 -> libEGL_nvidia.so.<driver>   (relative symlink; the ICD's soname)
 #   - empty placeholders for the host driver's ICD closure, which the container bind-mounts over
 #     (waydroid/nvidia_native.py emits those entries; the blobs themselves are never copied)
-#   - hw/vulkan.nvidia.so          our Vulkan HAL   (nvidia-prolapse/hal/out/android)
-#   - libgbm_mesa_wrapper.so       our gralloc backend (nvidia-prolapse/gralloc/out/android); the container
+#   - hw/vulkan.nvidia.so          our Vulkan HAL   (the driver's hal/out/android)
+#   - libgbm_mesa_wrapper.so       our gralloc backend (the driver's gralloc/out/android); the container
 #                                  bind-mounts it over /vendor/lib64/libgbm_mesa_wrapper.so
 #   - libminigbm_gralloc_gbm_mesa.so  minigbm's gbm_mesa core rebuilt with our patches (0001: CPU usage does
 #                                  not force LINEAR on GPU render targets; 0002: locks pass their access
-#                                  flags to the backend; nvidia-prolapse/gralloc make minigbm), bound over
+#                                  flags to the backend; the driver's gralloc/: make minigbm), bound over
 #                                  /vendor/lib64/libminigbm_gralloc_gbm_mesa.so
 # and /var/lib/waydroid/nvidia-glibc-shim-staging/vendor_extra/lib/ (32-bit x86, P6) with the same set built
 # for i686: shims from nvidia-prolapse/shim/out32 (ld-linux.so.2 front), host-glibc-version, the
@@ -26,7 +26,7 @@
 #   - libminigbm_gralloc_gbm_mesa.so  the patched core built 32-bit (out/android32), bound over
 #                                  /vendor/lib/libminigbm_gralloc_gbm_mesa.so: 32-bit locks pass their
 #                                  access flags too (a read lock never writes a block-linear buffer)
-#   - libdrm.so.2                  upstream libdrm built for bionic (nvidia-prolapse/libdrm/out);
+#   - libdrm.so.2                  upstream libdrm built for bionic (the driver's libdrm/out);
 #                                  the ICD dlopens it by this name and advertises
 #                                  VK_EXT_external_memory_dma_buf only when it loads
 # EGL (P7): <root>/vendor/lib{64,}/egl/ is bind-mounted over the guest's /vendor/lib{64,}/egl and holds
@@ -50,16 +50,17 @@
 # core are binds of the old inode and change only at the next container start.
 set -euo pipefail
 REPO=$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)
+DRIVER=$(python3 "$REPO/tools/driver_source.py" path)   # the driver checkout: HAL, gralloc, libdrm
 SHIM_OUT=$REPO/nvidia-prolapse/shim/out
 SHIM32_OUT=$REPO/nvidia-prolapse/shim/out32
-HAL_SO=$REPO/nvidia-prolapse/hal/out/android/vulkan.nvidia.so
-HAL32_SO=$REPO/nvidia-prolapse/hal/out/android32/vulkan.nvidia.so
-GBM_SO=$REPO/nvidia-prolapse/gralloc/out/android/libgbm_mesa_wrapper.so
-GBM32_SO=$REPO/nvidia-prolapse/gralloc/out/android32/libgbm_mesa_wrapper.so
-MG_SO=$REPO/nvidia-prolapse/gralloc/out/android/libminigbm_gralloc_gbm_mesa.so
-MG32_SO=$REPO/nvidia-prolapse/gralloc/out/android32/libminigbm_gralloc_gbm_mesa.so
-DRM_SO=$REPO/nvidia-prolapse/libdrm/out/libdrm.so.2
-DRM32_SO=$REPO/nvidia-prolapse/libdrm/out32/libdrm.so.2
+HAL_SO=$DRIVER/hal/out/android/vulkan.nvidia.so
+HAL32_SO=$DRIVER/hal/out/android32/vulkan.nvidia.so
+GBM_SO=$DRIVER/gralloc/out/android/libgbm_mesa_wrapper.so
+GBM32_SO=$DRIVER/gralloc/out/android32/libgbm_mesa_wrapper.so
+MG_SO=$DRIVER/gralloc/out/android/libminigbm_gralloc_gbm_mesa.so
+MG32_SO=$DRIVER/gralloc/out/android32/libminigbm_gralloc_gbm_mesa.so
+DRM_SO=$DRIVER/libdrm/out/libdrm.so.2
+DRM32_SO=$DRIVER/libdrm/out32/libdrm.so.2
 EGL_DIR=$REPO/nvidia-prolapse/egl
 EGL_FRONT="libEGL_nvnative.so libGLESv1_CM_nvnative.so libGLESv2_nvnative.so"
 EGL_ANGLE="libEGL_angle.so libGLESv1_CM_angle.so libGLESv2_angle.so"
@@ -69,18 +70,18 @@ L32=$ROOT/vendor_extra/lib
 die() { echo "native-deploy: $*" >&2; exit 1; }
 # Inputs first (they need no root), so a missing build is reported as such.
 [ -f "$SHIM_OUT/.checked" ] || die "$SHIM_OUT is not a checked shim build; run make -C $REPO/nvidia-prolapse/shim"
-[ -f "$HAL_SO" ] || die "$HAL_SO missing; build the Vulkan HAL: make -C $REPO/nvidia-prolapse/hal"
-[ -f "$GBM_SO" ] || die "$GBM_SO missing; build the gralloc backend: make -C $REPO/nvidia-prolapse/gralloc"
-[ -f "$GBM32_SO" ] || die "$GBM32_SO missing; build the 32-bit gralloc backend (mapper for mediaserver and 32-bit apps): make -C $REPO/nvidia-prolapse/gralloc android32"
+[ -f "$HAL_SO" ] || die "$HAL_SO missing; build the Vulkan HAL: make -C $DRIVER/hal"
+[ -f "$GBM_SO" ] || die "$GBM_SO missing; build the gralloc backend: make -C $DRIVER/gralloc"
+[ -f "$GBM32_SO" ] || die "$GBM32_SO missing; build the 32-bit gralloc backend (mapper for mediaserver and 32-bit apps): make -C $DRIVER/gralloc android32"
 case "$(LC_ALL=C readelf -h "$GBM32_SO" 2>/dev/null)" in *"Class:"*ELF32*) ;; *) die "$GBM32_SO is not an ELF32 object";; esac
-[ -f "$MG_SO" ] || die "$MG_SO missing; build minigbm's gbm_mesa core with our patch: make -C $REPO/nvidia-prolapse/gralloc minigbm check-minigbm"
+[ -f "$MG_SO" ] || die "$MG_SO missing; build minigbm's gbm_mesa core with our patch: make -C $DRIVER/gralloc minigbm check-minigbm"
 case "$(LC_ALL=C readelf -h "$MG_SO" 2>/dev/null)" in *"Class:"*ELF64*) ;; *) die "$MG_SO is not an ELF64 object";; esac
-[ -f "$MG32_SO" ] || die "$MG32_SO missing; build minigbm's gbm_mesa core (32-bit) with our patches: make -C $REPO/nvidia-prolapse/gralloc minigbm check-minigbm"
+[ -f "$MG32_SO" ] || die "$MG32_SO missing; build minigbm's gbm_mesa core (32-bit) with our patches: make -C $DRIVER/gralloc minigbm check-minigbm"
 case "$(LC_ALL=C readelf -h "$MG32_SO" 2>/dev/null)" in *"Class:"*ELF32*) ;; *) die "$MG32_SO is not an ELF32 object";; esac
-[ -f "$DRM_SO" ] && [ -f "$(dirname "$DRM_SO")/.checked" ] || die "$DRM_SO missing or not checked; build libdrm for bionic: make -C $REPO/nvidia-prolapse/libdrm"
+[ -f "$DRM_SO" ] && [ -f "$(dirname "$DRM_SO")/.checked" ] || die "$DRM_SO missing or not checked; build libdrm for bionic: make -C $DRIVER/libdrm"
 [ -f "$SHIM32_OUT/.checked" ] || die "$SHIM32_OUT is not a checked 32-bit shim build; run make -C $REPO/nvidia-prolapse/shim ARCH=x86"
-[ -f "$HAL32_SO" ] || die "$HAL32_SO missing; build the 32-bit Vulkan HAL: make -C $REPO/nvidia-prolapse/hal android32"
-[ -f "$DRM32_SO" ] && [ -f "$(dirname "$DRM32_SO")/.checked" ] || die "$DRM32_SO missing or not checked; build libdrm for 32-bit bionic: make -C $REPO/nvidia-prolapse/libdrm ARCH=x86"
+[ -f "$HAL32_SO" ] || die "$HAL32_SO missing; build the 32-bit Vulkan HAL: make -C $DRIVER/hal android32"
+[ -f "$DRM32_SO" ] && [ -f "$(dirname "$DRM32_SO")/.checked" ] || die "$DRM32_SO missing or not checked; build libdrm for 32-bit bionic: make -C $DRIVER/libdrm ARCH=x86"
 for f in "$HAL32_SO" "$DRM32_SO" "$SHIM32_OUT/libnvglibc.so"; do
     case "$(LC_ALL=C readelf -h "$f" 2>/dev/null)" in *"Class:"*ELF32*) ;; *) die "$f is not an ELF32 object";; esac
 done

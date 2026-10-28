@@ -17,7 +17,7 @@ Sources:
 | **FN** | frameworks/native android-13.0.0_r31 (2fe7eddf); all of these are under `build/p7/src/` |
 
 Tools: `test/fence-first-wait.c` (stock libglvnd, no code of ours; `--front` runs the same sequences through our front),
-`test/fence-race.c`, `test/host-window.c`, `../hal/test/vk-first-wait.c` (raw ICD or our HAL). The
+`test/fence-race.c`, `test/host-window.c`, `<driver checkout>/hal/test/vk-first-wait.c` (raw ICD or our HAL). The
 ioctl log comes from a measurement-only `ioctl` interposer (LD_PRELOAD, host only, not shipped) that prints the
 `DRM_NVIDIA_SEMSURF_*` arguments.
 
@@ -137,7 +137,7 @@ ioctl log comes from a measurement-only `ioctl` interposer (LD_PRELOAD, host onl
      - Vulkan: one state per **VkQueue**, created with the device (`vkCreateDevice` + `vkGetDeviceQueue` make
        3 + one `CTX_CREATE` per created queue). A queue's submissions, waits and exports all use its own state; a
        start on one queue does not cover another queue of the same family or of another family; idling, other
-       threads and the `vkGetDeviceQueue2` handle change nothing (`../hal/AHB-CONTRACT.md` §8.1).
+       threads and the `vkGetDeviceQueue2` handle change nothing (`<driver checkout>/hal/AHB-CONTRACT.md` §8.1).
    - **Wait** (`eglWaitSync[KHR]` on an imported fd; Vulkan semaphore wait on an imported `SYNC_FD`):
      - The fd is stored, and merged with any already pending wait, so two waits become one `FENCE_WAIT`.
      - At the next submission: `FENCE_WAIT(pre = V, post = V + 1)`, `V := V + 1`, GPU acquire of `V` ahead of the
@@ -173,7 +173,7 @@ ioctl log comes from a measurement-only `ioctl` interposer (LD_PRELOAD, host onl
        `switch-ctx`, `switch-after-wait`, `rebind`, `migrate`, `migrate-warm`.
      - The traces of `warm-nodup`, `switch-ctx`, `release-thread`, `two-waits` and `main-warm-ctx` follow the
        transitions above step by step.
-   - **Vulkan, same defect** (`../hal/test/vk-first-wait.c`, fresh device, queue and thread per round, 20 rounds,
+   - **Vulkan, same defect** (`<driver checkout>/hal/test/vk-first-wait.c`, fresh device, queue and thread per round, 20 rounds,
      GPU timestamps calibrated to `CLOCK_MONOTONIC`):
      - The work ends 10.5–12.6 ms *after* `poll()` saw the exported fd signalled in 20/20 for `sem-export`,
        `fence-export` and `hal-seq`. `hal-seq` is the exact `vkAcquireImageANDROID` → submit →
@@ -243,7 +243,7 @@ queue's timeline in `vkCreateDevice`. The blob is not touched.
 The first version of this document rejected such a start ("a warm-up native fence per thread would hide the defect,
 rely on unpublished per-thread state, and not cover fences created by app or SurfaceFlinger code"). That was
 reversed once the mechanism was understood, because each objection was answered:
-- *Hides the defect*: `make driver-check` (here and in `../hal`) keeps detecting it through stock glvnd and the raw
+- *Hides the defect*: `make driver-check` (here and in `<driver checkout>/hal`) keeps detecting it through stock glvnd and the raw
   ICD and fails on 615.71.09; the bug report draft stays (`NVIDIA-BUG-D1.md`).
 - *Unpublished state*: the start relies on one measured fact per API, that a timeline is created only inside
   `eglMakeCurrent` / with a VkQueue at `vkCreateDevice` (§3.5, with the creation census above), not on its internals.
@@ -295,10 +295,10 @@ processed on that state. Equivalently, `started == 1` before the first `FENCE_WA
   context 0.08 → 1.41 µs (after a glClear 0.10 → 3.3 µs: the start flushes the pending work); switching between two
   contexts 5.8 → 10.7 µs; unbind + bind 6.1 → 10.9 µs; the first bind of a new thread 28.8 → 28.9 ms (the driver's).
 
-**Vulkan: the HAL (`../hal/src/device.c`, `vkCreateDevice`).** One state per VkQueue, created with the device. Before
+**Vulkan: the HAL (`<driver checkout>/hal/src/device.c`, `vkCreateDevice`).** One state per VkQueue, created with the device. Before
 the device is returned, every queue of every `VkDeviceQueueCreateInfo` gets one empty submit with an exportable fence
 (or semaphore) and its sync_fd export; nothing of the app can have waited yet. Details, measurements, cost and the
-loud failures: `../hal/AHB-CONTRACT.md` §8.
+loud failures: `<driver checkout>/hal/AHB-CONTRACT.md` §8.
 
 **Proof by test (2026-10-11, host; verdicts by GPU timestamps).**
 - `make front-fence-check`: all 23 fence-first-wait sequences through the front on the Android platform display, 200
@@ -306,7 +306,7 @@ loud failures: `../hal/AHB-CONTRACT.md` §8.
   `khr-fence` 0/24 (stock lib32 glvnd 24/24).
 - `make driver-check` (stock glvnd, 10 rounds): 10/10 early in `first-wait`, `release-thread`, `main-warm-ctx`,
   `two-waits`, `client-wait-first`, `khr-fence`, `pbuffer-first`; 0 in the other 16 (also 24 rounds: 24/24 and 0).
-- `../hal` `make hal-fence-check`: all 23 vk-first-wait modes through the HAL, 200 rounds each, plus the semaphore-only
+- `<driver checkout>/hal` `make hal-fence-check`: all 23 vk-first-wait modes through the HAL, 200 rounds each, plus the semaphore-only
   start: **0 early**; the raw ICD (`make driver-check`, 10 rounds): 10/10 early in 8 modes. host32 HAL vs lib32 ICD:
   `hal-seq`, `fence-export`, `mq-warm-g0-use-c0` 0/24 vs 24/24.
 - Host stress (README "Tests"), `tools/host-window-stress.sh`, every run first frame + steady state + interval 1→0→1 +
@@ -321,7 +321,7 @@ loud failures: `../hal/AHB-CONTRACT.md` §8.
   order. We now use NVIDIA's own order (wait, then SetColorBuffers, §4.1), which avoids the question.
 - Two further code paths in the driver set `started` without a release. They are conditional on flags not
   identified. Neither fired in any traced run, and neither can break invariant I, since they only set `started`.
-- Multi-queue Vulkan devices: **measured** (2026-10-11): one state per VkQueue (`../hal/AHB-CONTRACT.md` §8.1).
+- Multi-queue Vulkan devices: **measured** (2026-10-11): one state per VkQueue (`<driver checkout>/hal/AHB-CONTRACT.md` §8.1).
 - Errored (-ETIMEDOUT) fences: **measured** (2026-10-11, scratch tool, 20 rounds through stock glvnd and 20 through
   the front): the fd from a Vulkan submission blocked on an unsignalled timeline value signals after 5.37–5.44 s with
   sync_file status −110; `eglWaitSync` on it returns `EGL_TRUE` (error 0x3000) at once and the GPU proceeds; the

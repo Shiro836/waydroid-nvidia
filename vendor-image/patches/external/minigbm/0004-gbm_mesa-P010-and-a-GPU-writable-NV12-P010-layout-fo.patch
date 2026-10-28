@@ -8,7 +8,7 @@ Applies to https://github.com/waydroid/android_external_minigbm
 16844babfbd83d7c206ca22256257cbf26ca7de1 ("gralloc: Handle PixelFormat::R_8"),
 after 0001..0003.
 
-Hardware video decoders (nvidia-prolapse/media, Codec2) allocate their output
+Hardware video decoders (the nvidia-prolapse Codec2 decoder) allocate their output
 blocks as HAL_PIXEL_FORMAT_YCbCr_420_888 (-> NV12) and, for 10-bit streams,
 HAL_PIXEL_FORMAT_YCBCR_P010 (-> DRM P010), and the NVIDIA copy engine writes the
 decoded picture into them (nv_video_copy_out, LINEAR target).

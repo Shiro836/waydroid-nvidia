@@ -8,7 +8,9 @@ compute.spv: compute.comp
 compute_spv.h: compute.spv
 	python3 -I -c 'import sys;d=open(sys.argv[1],"rb").read();print("static const unsigned char compute_spv[%d] __attribute__((aligned(4))) = {%s};"%(len(d),",".join(str(b) for b in d)))' $< > $@
 # HAL_INC: pinned AOSP hwvulkan.h/hardware.h copies, for the --hal bootstrap
-HAL_INC := -I../hal/include/android
+# (the driver repository's hal/include: ../../tools/driver_source.py, or DRIVER=<checkout>)
+DRIVER  ?= $(shell python3 $(CURDIR)/../../tools/driver_source.py path)
+HAL_INC := -I$(DRIVER)/hal/include/android
 vkcompute: vkcompute.c compute_spv.h
 	$(CC) $(CFLAGS) $(HAL_INC) -o $@ vkcompute.c -ldl
 # vkexts: which device extensions vkCreateDevice accepts (--all/--each/--bisect/--with)

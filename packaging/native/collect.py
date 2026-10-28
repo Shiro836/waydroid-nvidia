@@ -7,8 +7,9 @@ Writes OUT_DIR/payload/ in the staged-root layout dev/source-native stages (vend
 vendor/lib{,64}/egl/*_nvrm.so, the Codec2 vendor libraries and service), OUT_DIR/gate/ (the CI-built
 install-time gate programs, references and SPIR-V) and OUT_DIR/BUILD-RECORD.json (format 2): sha256 of
 every payload/ and gate/ file (and, under "glibc_shim_files", of glibc-shim mode's glibc-shim/ tree:
-collect_glibc_shim()), the commit, the Mesa pin, the Rust build metadata and the Rust RM library
-each nvrm ABI was linked against. The source list is dev/source-native's own (stage_sources,
+collect_glibc_shim(); under "driver_files", of driver/: the driver's install-time media gate files), the
+commit, the driver commit and dirty flag (tools/driver_source.py), the Mesa pin, the Rust build metadata
+and the Rust RM library each nvrm ABI was linked against. The source list is dev/source-native's own (stage_sources,
 media_sources, the nvrm build artifacts), release profile; nvrm is debug-stripped exactly as a local
 stage strips it (llvm-strip --strip-debug). ANGLE comes from the angle job, not from here. Every input
 must exist and have the expected ELF class; nothing is skipped.
@@ -27,6 +28,14 @@ import subprocess
 import sys
 
 REPO = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPO / 'tools'))
+import driver_source  # noqa: E402
+DRIVER = driver_source.checkout()
+# Files of the driver an installed package runs (packaging/native/release_gate.py media cases, the Rust build
+# record reader dev/source-native imports), shipped in the bundle under driver/ (driver_source.checkout() of a
+# packaged install).
+DRIVER_FILES = ('media/stage-odm.sh', 'media/test/validate_xml.py', 'tools/native_rust_profile.py')
+DRIVER_TREES = ('media/odm',)
 
 
 def load(path, name):
@@ -64,7 +73,8 @@ def build_environment():
 
 
 # glibc-shim mode's guest side (packaging/native/glibc_shim.py reads this tree): built by build-native.sh's
-# glibc-shim target from nvidia-prolapse/{shim,hal,gralloc,libdrm,egl}. NVIDIA's libraries are never in it.
+# glibc-shim target from nvidia-prolapse/{shim,egl} and the driver's hal, gralloc and libdrm. NVIDIA's libraries are
+# never in it.
 GLIBC_SHIM_SHIMS = {'lib64': ('out', ('libnvglibc.so', 'libc.so.6', 'libm.so.6', 'libpthread.so.0', 'librt.so.1',
                                       'libdl.so.2', 'ld-linux-x86-64.so.2')),
                     'lib': ('out32', ('libnvglibc.so', 'libc.so.6', 'libm.so.6', 'libpthread.so.0', 'librt.so.1',
@@ -80,10 +90,10 @@ def glibc_shim_sources():
         lib = f'root/vendor_extra/{sub}'
         for name in shims:
             src[f'{lib}/{name}'] = p / 'shim' / shim_out / name
-        src[f'{lib}/hw/vulkan.nvidia.so'] = p / 'hal/out' / android / 'vulkan.nvidia.so'
-        src[f'{lib}/libgbm_mesa_wrapper.so'] = p / 'gralloc/out' / android / 'libgbm_mesa_wrapper.so'
-        src[f'{lib}/libminigbm_gralloc_gbm_mesa.so'] = p / 'gralloc/out' / android / 'libminigbm_gralloc_gbm_mesa.so'
-        src[f'{lib}/libdrm.so.2'] = p / 'libdrm' / ('out' if sub == 'lib64' else 'out32') / 'libdrm.so.2'
+        src[f'{lib}/hw/vulkan.nvidia.so'] = DRIVER / 'hal/out' / android / 'vulkan.nvidia.so'
+        src[f'{lib}/libgbm_mesa_wrapper.so'] = DRIVER / 'gralloc/out' / android / 'libgbm_mesa_wrapper.so'
+        src[f'{lib}/libminigbm_gralloc_gbm_mesa.so'] = DRIVER / 'gralloc/out' / android / 'libminigbm_gralloc_gbm_mesa.so'
+        src[f'{lib}/libdrm.so.2'] = DRIVER / 'libdrm' / ('out' if sub == 'lib64' else 'out32') / 'libdrm.so.2'
         src[f'{lib}/libnvnative-egl-android.so'] = p / 'egl/out' / android / 'libnvnative-egl-android.so'
         src[f'{lib}/nvnative_egl_android.json'] = p / 'egl/nvnative_egl_android.json'
         src[f'{lib}/nvglibc-default-env'] = p / 'egl/nvglibc-default-env'
@@ -124,6 +134,24 @@ def collect_glibc_shim(out, sn, problems):
         dest.write_text(''.join(n + '\n' for n in names))
         dest.chmod(0o644)
         files[f'glibc-shim/check/libdrm-{arch}.names'] = sha256(dest)
+    return files
+
+
+def collect_driver_files(out):
+    """Copy DRIVER_FILES and DRIVER_TREES into out/driver; {relative path: sha256} for BUILD-RECORD.json."""
+    rels = list(DRIVER_FILES)
+    for tree in DRIVER_TREES:
+        rels += sorted(str(p.relative_to(DRIVER)) for p in (DRIVER / tree).rglob('*') if p.is_file())
+    files = {}
+    for rel in rels:
+        src = DRIVER / rel
+        if not src.is_file():
+            raise SystemExit(f'collect: {src} missing in the driver checkout')
+        dest = out / 'driver' / rel
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(src, dest)
+        dest.chmod(0o755 if os.access(src, os.X_OK) else 0o644)
+        files['driver/' + rel] = sha256(dest)
     return files
 
 
@@ -169,7 +197,7 @@ def main():
             problems.append(f'{path} is not ELF{want} (for {rel})')
     if problems:
         raise SystemExit('collect: build incomplete; run packaging/native/build-native.sh:\n  ' + '\n  '.join(problems))
-    rust_builds = {t: sn.profiles.verify_metadata(REPO, t, profile) for t in sn.profiles.TARGETS}
+    rust_builds = {t: sn.profiles.verify_metadata(DRIVER, t, profile) for t in sn.profiles.TARGETS}
     if out.exists():
         raise SystemExit(f'collect: {out} exists; use a new directory')
     glibc_shim = collect_glibc_shim(out, sn, problems)
@@ -195,10 +223,12 @@ def main():
     commit = subprocess.run(['git', '-C', str(REPO), 'rev-parse', 'HEAD'], capture_output=True, text=True).stdout.strip()
     dirty = bool(subprocess.run(['git', '-C', str(REPO), 'status', '--porcelain', '--untracked-files=no'],
                                 capture_output=True, text=True).stdout.strip())
-    mesa_pin = sn.re.search(r'^PIN = "([0-9a-f]{40})"', (REPO / 'nvidia-prolapse/driver-source/native/mesa/build.py')
-                            .read_text(), sn.re.M).group(1)
+    driver = driver_source.identity()
+    driver_files = collect_driver_files(out)
+    mesa_pin = sn.re.search(r'^PIN = "([0-9a-f]{40})"', (DRIVER / 'mesa/build.py').read_text(), sn.re.M).group(1)
     record = {'format': 2, 'component': 'nvidia-prolapse native stack (mesa-nvk-rust-rm + nvrm + Codec2 NVDEC)',
               'commit': commit, 'dirty': dirty, 'release': os.environ.get('RELEASE_TAG') or None,
+              'driver': driver, 'driver_files': driver_files,
               'mesa_commit': mesa_pin, 'rust_profile': profile, 'rust_builds': rust_builds,
               'nvrm_rust_sha256': nvrm_rust, 'nvrm_builds': nvrm_builds,
               'build_environment': build_environment(),
@@ -206,7 +236,9 @@ def main():
               'glibc_shim_files': glibc_shim,
               'glibc_shim_check': 'packaging/native/glibc_shim.py (waydroid-nvidia-setup --mode glibc-shim)'}
     (out / 'BUILD-RECORD.json').write_text(json.dumps(record, indent=2) + '\n')
-    print(f'collected {len(files)} files into {out} (commit {commit[:12]}{" dirty" if dirty else ""})')
+    print(f'collected {len(files)} files into {out} (commit {commit[:12]}{" dirty" if dirty else ""}; driver '
+          f'{driver["commit"][:12]}{" dirty" if driver["dirty"] else ""}'
+          f'{"" if driver["matches_pin"] else ", not the pinned " + driver["pinned_commit"][:12]})')
 
 
 if __name__ == '__main__':

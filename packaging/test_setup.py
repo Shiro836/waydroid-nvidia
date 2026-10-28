@@ -138,7 +138,7 @@ def test_tools_run_in_the_c_locale(env):
 
 
 @pytest.mark.parametrize('script', ['packaging/install.sh', 'packaging/aur/waydroid-nvidia-bin/waydroid-nvidia-setup',
-                                    'nvidia-prolapse/media/stage-odm.sh', 'packaging/native/wd-native'])
+                                    'packaging/native/wd-native'])
 def test_shell_entrypoints_set_the_c_locale(script):
     text = (REPO / script).read_text()
     assert 'set -euo pipefail\n' in text

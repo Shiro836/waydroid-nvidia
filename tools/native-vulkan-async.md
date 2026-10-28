@@ -149,17 +149,17 @@ unchanged `HEAD:tools/native-vulkan-async.c` pass the stock pending-export and
 (`6 → 29`). See `stock-async-{before,after}-convert.log` in that directory. This
 pre-existing stock lifetime result is not relaxed by the conversion option.
 
-The separate `native-vulkan-regression.py` prints checked commands for compute,
+The driver checkout's `tests/vulkan/run.py` (`tools/driver_source.py path`) prints checked commands for compute,
 offscreen graphics, DMA-BUF/sync-file interop and HAL ANB/ASTC/AHB probes:
 
 ```sh
-python tools/native-vulkan-regression.py
-python tools/native-vulkan-regression.py --target host --suite core
+python "$(python3 tools/driver_source.py path)/tests/vulkan/run.py"
+python "$(python3 tools/driver_source.py path)/tests/vulkan/run.py" --target host --suite core
 ```
 
 Add `--run` only when the GPU slot is available and the async gate has passed.
 Tests run serially, stop at the first failure, and retain separate logs under
-`build/native-vulkan-regression`. ANB uses its strict pending-release requirement.
+its `--logs` directory. ANB uses its strict pending-release requirement.
 Android AHB requires a separate real-guest gralloc test; the runner includes
 only the existing host AHB fixture. The runner does not deploy or start Waydroid.
 

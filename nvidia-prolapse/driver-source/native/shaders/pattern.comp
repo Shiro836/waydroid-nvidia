@@ -1,8 +1,0 @@
-#version 450
-// Independent diagnostic shader; the runtime compiles this SPIR-V through NAK.
-layout(local_size_x = 256) in;
-layout(set = 0, binding = 0, std430) writeonly buffer Output { uint words[]; } output_data;
-void main() {
-    uint index = gl_GlobalInvocationID.x;
-    output_data.words[index] = index * 17u + 123u;
-}

@@ -21,8 +21,9 @@ video ── Codec2 ──▶ our NVDEC decoder ──────────�
   image, built from source on Waydroid's LineageOS 20 tree. The system image stays the official one.
 - No NVIDIA userspace library runs in the container. The host provides only the device nodes.
 
-Code: `nvidia-prolapse/driver-source/native/`, `nvidia-prolapse/gralloc/`, `nvidia-prolapse/media/`,
-`vendor-image/`.
+Code: the driver repository [nvidia-prolapse](https://github.com/Shiro836/nvidia-prolapse) (NVK and the Rust RM
+backend, `nvrm`, the Vulkan HAL, gralloc, the Codec2 decoder), built at the commit `vendor-image/pins.env` pins;
+`vendor-image/` here.
 
 ## glibc-shim
 
@@ -41,10 +42,11 @@ refused too: its Vulkan driver cannot import or export a fence as a sync_file, w
 every buffer over with. Two driver defects with imported sync_files make the Vulkan HAL's `vkAcquireImageANDROID`
 wait for the buffer's fence on the CPU and import "already signalled" instead: on 550 to 560 when the app asks
 for a fence (waiting on a fence whose sync_file has not signalled yet crashes the driver), on 580 when it asks
-for a semaphore (the driver keeps an already signalled sync_file open forever). `make -C nvidia-prolapse/hal
+for a semaphore (the driver keeps an already signalled sync_file open forever). `make -C <driver checkout>/hal
 syncfd-check` measures both on the installed driver.
 
-Code: `nvidia-prolapse/shim/`, `hal/`, `egl/`, `gralloc/`, `libdrm/`.
+Code: `nvidia-prolapse/shim/`, `egl/`; the HAL, gralloc backend and libdrm are the driver repository's `hal/`,
+`gralloc/` and `libdrm/` (their glibc-shim build targets).
 
 ## venus
 

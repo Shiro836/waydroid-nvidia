@@ -2,7 +2,7 @@
  *
  * Bionic-free harness (glibc, ASan/UBSan): the window is a struct ANativeWindow per system/window.h
  * (include/nvn_android.h) acting as a small BufferQueue. Its buffers are real dma-bufs allocated by our gralloc
- * backend's host build (nvidia-prolapse/gralloc, the same code minigbm runs in the guest), wrapped in
+ * backend's host build (the driver's gralloc/, the same code minigbm runs in the guest), wrapped in
  * cros_gralloc_handle + ANativeWindowBuffer exactly as minigbm lays them out. A consumer thread plays
  * SurfaceFlinger: it waits for each queued buffer's acquire fence on the GPU, imports the dma-buf through a
  * *separate* path (EGL_LINUX_DMA_BUF_EXT on a device display, not the platform's NVX import), reads pixels back,

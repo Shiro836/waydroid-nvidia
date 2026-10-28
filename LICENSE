@@ -51,8 +51,7 @@ THIRD_PARTY.md.
 ----------------------
 Original work under the MIT license above, same copyright line:
 
-    nvidia-prolapse/      (shim, probe, hal, gralloc, libdrm, media, egl,
-                           driver-source/native)
+    nvidia-prolapse/      (shim, probe, egl)
     dev/ additions        (driver-mode, source-native, native-deploy,
                            build-waydroid, deploy-guest, mc-vv, tests)
     hwcomposer/  angle/  tools/   (scripts and documentation)
@@ -64,28 +63,13 @@ Exceptions (inherit the upstream or stated license):
                                       GPL-3.0-or-later (installed into Waydroid)
     waydroid/patches/                 Apache-2.0    (AOSP frameworks/native)
     hwcomposer/patches/               Apache-2.0    (android_hardware_waydroid)
-    hwcomposer/aidl-stubs/, nvidia-prolapse/hal/include/android/,
-    nvidia-prolapse/hal/include/host/, nvidia-prolapse/media/c2/,
-    nvidia-prolapse/media/odm/, nvidia-prolapse/media/vndk/patches/
-                                      Apache-2.0    (AOSP interfaces)
-    nvidia-prolapse/gralloc/include/  Apache-2.0    (minigbm gbm_mesa wrapper ABI)
-    nvidia-prolapse/gralloc/minigbm/  BSD-3-Clause  (minigbm)
+    hwcomposer/aidl-stubs/           Apache-2.0    (AOSP interfaces)
     angle/patches/                    BSD-3-Clause  (ANGLE)
-    nvidia-prolapse/driver-source/native/mesa/*.patch, gallium-nvrm/,
-    nvidia-prolapse/driver-source/native/compiler/ (Mesa adaptation)
-                                      MIT           (Mesa; see compiler/MESA-MIT.txt)
-    nvidia-prolapse/driver-source/native/vendor/nvidia/
-                                      MIT           (NVIDIA open headers, notice in file)
-    nvidia-prolapse/driver-source/native/licenses/
-                                      notices of ash (MIT/Apache-2.0), tinygrad (MIT)
-                                      and NVIDIA's public headers (MIT)
-    nvidia-prolapse/driver-source/native/src/vp9_tables.rs
-                                      values from libvpx (BSD-3-Clause, notice in file)
-    nvidia-prolapse/driver-source/native/src/video/av1/cdf_defaults.rs
-                                      values from Mesa (MIT, AMD; notice in file)
-    nvidia-prolapse/driver-source/native/src/video/av1/testdata/
-                                      Big Buck Bunny (c) 2008 Blender Foundation,
-                                      CC-BY 3.0, re-encoded (see README.md there)
+
+The driver itself (NVK over the Rust RM backend, nvrm, the Vulkan HAL, gralloc,
+the Codec2 decoder, bionic libdrm) is not part of this repository: it is built
+from github.com/Shiro836/nvidia-prolapse at the commit vendor-image/pins.env
+pins, under that repository's licence files.
 
 No NVIDIA binary is part of this repository. The native modes load the host's
 installed NVIDIA kernel module (and, in glibc-shim mode, the host's installed

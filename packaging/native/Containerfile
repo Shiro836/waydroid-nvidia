@@ -2,7 +2,7 @@
 #
 # Why a container: the builder gets no system package changes, and a build must not depend on whatever the
 # runner host has installed. Why Arch: the host-side NVK build (mesa_clc) links the system LLVM/Clang and the
-# Arch packages of libclc + SPIRV-LLVM-Translator pinned in nvidia-prolapse/driver-source/native/mesa/
+# Arch packages of libclc + SPIRV-LLVM-Translator pinned in the driver repository's mesa/
 # host-build-deps.json, so the toolchain has to be that LLVM release.
 #
 # Pinning: the base image by digest, every package from the Arch Linux Archive snapshot ARCH_SNAPSHOT (a fixed
@@ -12,7 +12,8 @@
 FROM archlinux@sha256:fe6972d4dc1f660c0c10f4c41b2de8986bab89e7e2955378f8beadb8ebcd7433
 
 ARG ARCH_SNAPSHOT=2026/10/15
-ARG RUST_VERSION=1.95.0
+# = the driver's rust-toolchain.toml channel (build-native.sh refuses a driver pinning another one)
+ARG RUST_VERSION=1.99.1
 ENV LANG=C.UTF-8 LC_ALL=C.UTF-8
 RUN echo "Server = https://archive.archlinux.org/repos/${ARCH_SNAPSHOT}/\$repo/os/\$arch" > /etc/pacman.d/mirrorlist \
     && printf '[multilib]\nInclude = /etc/pacman.d/mirrorlist\n' >> /etc/pacman.conf \
@@ -29,8 +30,9 @@ RUN echo "Server = https://archive.archlinux.org/repos/${ARCH_SNAPSHOT}/\$repo/o
 # Rust: one pinned toolchain (Arch's rustup proxies in /usr/bin), read-only for the build user; CARGO_HOME (crate
 # cache) is set per run, inside build/
 ENV RUSTUP_HOME=/opt/rustup
-RUN rustup toolchain install "$RUST_VERSION" --profile minimal --component rustfmt --target x86_64-linux-android --target i686-linux-android \
+RUN rustup toolchain install "$RUST_VERSION" --profile minimal --component rustfmt,clippy,rust-src \
+        --target x86_64-linux-android --target i686-linux-android --target x86_64-unknown-linux-gnu \
     && rustup default "$RUST_VERSION" && chmod -R a+rX /opt/rustup && rustc --version && cargo --version
-# The Vulkan HAL build expects NDK r30 at /opt/android-ndk (nvidia-prolapse/hal, native/mesa/build-hal*.py);
+# The Vulkan HAL build expects NDK r30 at /opt/android-ndk (the driver repository's hal/Makefile, hal/build-nvk*.py);
 # build-native.sh mounts the cached, sha256-checked NDK at /cache/ndk-r30.
 RUN ln -s /cache/ndk-r30/android-ndk-r30 /opt/android-ndk

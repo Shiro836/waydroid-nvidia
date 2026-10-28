@@ -65,12 +65,6 @@ nvidia-prolapse/probe/*.apk.idsig
 nvidia-prolapse/probe/glesapp/out/
 nvidia-prolapse/probe/hwuiapp/out/
 
-# driver-source: only native/ and this directory's README are tracked.
-nvidia-prolapse/driver-source/*
-!nvidia-prolapse/driver-source/README.md
-!nvidia-prolapse/driver-source/native/
-nvidia-prolapse/driver-source/native/target/
-
 # Never commit NVIDIA userspace, captures or traces
 *.nvcap
 *.qpa

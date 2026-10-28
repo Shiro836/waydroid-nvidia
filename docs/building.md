@@ -11,8 +11,9 @@ applies our patches and runs a recipe script. CI uses the same scripts.
 ## Repository layout
 
 ```
-nvidia-prolapse/    native driver parts, independent of Waydroid (see nvidia-prolapse/README.md)
-  driver-source/native/  Rust RM backend, NVK/NAK patches, nvrm GL driver, NVDEC video
+nvidia-prolapse/    glibc-shim mode's shims and EGL front, probes (see nvidia-prolapse/README.md); the driver
+                    itself is github.com/Shiro836/nvidia-prolapse, pinned in vendor-image/pins.env and
+                    fetched into build/nvidia-prolapse-src (tools/driver_source.py)
 waydroid/           Waydroid integration of the driver modes (see waydroid/README.md)
 vendor-image/       our Waydroid vendor image, built on a LineageOS 20 tree
 hwcomposer/ angle/  display HAL and ANGLE, shared by all modes

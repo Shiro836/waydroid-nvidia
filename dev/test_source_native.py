@@ -350,7 +350,7 @@ class AdoptTest(unittest.TestCase):
         self.manifest = {'format': 1, 'driver': 'mesa-nvk-rust-rm', 'graphics_abis': ['x86_64', 'x86'],
                          'artifacts': artifacts, 'sources': sources}
         (self.root / 'source-rm.json').write_text(json.dumps(self.manifest))
-        self.gate = {'runner': 'tools/native-vulkan-regression.py --run', 'exit': 0, 'kernel_module': V,
+        self.gate = {'runner': '<driver>/tests/vulkan/run.py --run', 'exit': 0, 'kernel_module': V,
                      'finished': 'now', 'log_dir': str(top / 'logs'),
                      'exercised': ['vendor_extra/lib64/libvulkan_nouveau.so'], 'cases': []}
 
@@ -461,12 +461,13 @@ class RustProfileTest(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
         self.profiles = sn.profiles
-        for name in ('src/lib.rs', 'Cargo.toml', 'Cargo.lock', 'mesa/nv_rm.h',
-                     'mesa/nvkmd_rm.h', 'mesa/nvkmd_rm.c', 'mesa/build.py',
-                     'mesa/build-compat.patch', 'mesa/rm-integration.patch'):
-            touch(self.root / 'nvidia-prolapse/driver-source/native' / name, b'fixture source')
-        touch(self.root / 'tools/native_rust_profile.py', b'fixture helper')
-        self.runner = sn._load(REPO / 'tools/native-vulkan-regression.py', 'profile_regression_test')
+        # a driver checkout's Rust build inputs (the driver's tools/native_rust_profile.py source_snapshot)
+        for name in ('rm/src/lib.rs', 'rm-abi/src/lib.rs', 'rm-core/src/lib.rs', 'rm-sys/src/lib.rs', 'video/src/lib.rs',
+                     'rm/Cargo.toml', 'rm-abi/Cargo.toml', 'rm-core/Cargo.toml', 'rm-sys/Cargo.toml', 'video/Cargo.toml',
+                     'Cargo.toml', 'Cargo.lock', 'mesa/nv_rm.h', 'mesa/nvkmd_rm.h', 'mesa/nvkmd_rm.c', 'mesa/build.py',
+                     'mesa/build-compat.patch', 'mesa/rm-integration.patch', 'tools/native_rust_profile.py'):
+            touch(self.root / name, b'fixture source')
+        self.runner = sn._load(sn.RUNNER, 'profile_regression_test')
 
     def record(self, target, profile):
         rust = self.profiles.rust_library(self.root, target, profile)
@@ -479,7 +480,7 @@ class RustProfileTest(unittest.TestCase):
 
     def test_profile_selects_same_target_path_for_stage_and_launch(self):
         for profile, directory in [('dev', 'debug'), ('release', 'release')]:
-            with mock.patch.object(sn, 'REPO', self.root), mock.patch.object(self.runner, 'ROOT', self.root):
+            with mock.patch.object(sn, 'DRIVER', self.root), mock.patch.object(self.runner, 'ROOT', self.root):
                 sources = sn.stage_sources(profile)
                 for target, sub, triple in [('android', 'lib64', 'x86_64-linux-android'),
                                             ('android32', 'lib', 'i686-linux-android')]:
@@ -491,7 +492,7 @@ class RustProfileTest(unittest.TestCase):
                     self.assertNotIn(str(expected.parent.with_name(other)), env['LD_LIBRARY_PATH'].split(':'))
                 env, _ = self.runner.launch('host', ['fixture'], profile)
                 self.assertEqual(str(self.root / f'build/nv-rm-rust/{directory}'), env['LD_LIBRARY_PATH'].split(':')[0])
-        with mock.patch.object(sn, 'REPO', self.root):
+        with mock.patch.object(sn, 'DRIVER', self.root):
             self.assertEqual(sn.stage_sources(), sn.stage_sources('dev'))
 
     def test_metadata_rejects_profile_mix_stale_rust_and_stale_mesa(self):
@@ -511,7 +512,7 @@ class RustProfileTest(unittest.TestCase):
     def test_source_changes_refuse_staging_and_in_build_changes_refuse_metadata(self):
         self.record('host', 'release')
         old = self.profiles.source_snapshot(self.root)
-        touch(self.root / 'nvidia-prolapse/driver-source/native/src/lib.rs', b'new source')
+        touch(self.root / 'rm/src/lib.rs', b'new source')
         with self.assertRaisesRegex(RuntimeError, 'source inputs changed'):
             self.profiles.verify_metadata(self.root, 'host', 'release')
         before = self.profiles.metadata_path(self.root, 'host').read_bytes()
@@ -888,7 +889,7 @@ class NativeGlGateTest(unittest.TestCase):
             touch(self.repo / 'staged-src' / rel, data + rel.encode())
             self.sources[rel] = self.repo / 'staged-src' / rel
         touch(self.repo / 'tools/llvm-strip', b'')
-        touch(self.repo / 'smoke.py', b'')
+        touch(self.repo / 'mesa/tests/gl-android-smoke.py', b'')
         self.smoke_env = None
 
     def build(self, rust_sha=None, targets=('android', 'android32')):
@@ -911,7 +912,7 @@ class NativeGlGateTest(unittest.TestCase):
 
     def smoke(self, cmd, env=None, **kw):
         self.smoke_env = env
-        fake = Path(env['PROLAPSE_ROOT'])
+        fake = Path(cmd[1]).parents[2]      # the private tree laid out like the driver checkout
         for target, sub, abi, triple in sn.NVRM_TARGETS:     # the runner sees the stripped staged bytes
             assert not (fake / f'build/nvrm-{target}/src/egl/libEGL_nvrm.so').read_bytes().endswith(b'debug')
             assert (fake / f'build/nv-rm-rust/{triple}/release/libnv_bionic_native.so').read_bytes() == \
@@ -920,9 +921,10 @@ class NativeGlGateTest(unittest.TestCase):
 
     def gate(self, smoke_rc=0):
         self.smoke_rc = smoke_rc
-        with mock.patch.object(sn, 'REPO', self.repo), \
+        with mock.patch.object(sn, 'REPO', self.repo), mock.patch.object(sn, 'DRIVER', self.repo), \
              mock.patch.object(sn, 'NDK_BIN', self.repo / 'tools'), \
-             mock.patch.object(sn, 'NVRM_SMOKE', self.repo / 'smoke.py'), \
+             mock.patch.object(sn, 'NVRM_TESTS', self.repo / 'mesa/tests'), \
+             mock.patch.object(sn, 'NVRM_SMOKE', self.repo / 'mesa/tests/gl-android-smoke.py'), \
              mock.patch.object(sn, 'run', side_effect=self.strip), \
              mock.patch.object(sn.subprocess, 'run', side_effect=self.smoke), \
              mock.patch.object(sn, '_needed', return_value=['libc.so', 'libnv_bionic_native.so']), \

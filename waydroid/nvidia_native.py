@@ -81,7 +81,7 @@
 #      lib64/libminigbm_gralloc_gbm_mesa.so               minigbm's gbm_mesa core, rebuilt with
 #                                                         our patch (item after the backend)
 #      lib64/libdrm.so.2                                  upstream libdrm built for bionic
-#                                                         (nvidia-prolapse/libdrm)
+#                                                         (the driver's libdrm/)
 #    libdrm.so.2 is required, not a nicety. Measured on the host (driver 615.71.09): NVIDIA's
 #    ICD advertises VK_EXT_external_memory_dma_buf only when dlopen("libdrm.so.2") succeeds in
 #    its own namespace AND the NVIDIA render node is present (vkcaps with libdrm.so.2 denied
@@ -105,7 +105,7 @@
 #
 #  * <root>/vendor_extra/lib64/libminigbm_gralloc_gbm_mesa.so  ->  /vendor/lib64/libminigbm_gralloc_gbm_mesa.so
 #    minigbm's gbm_mesa core (allocator service, 64-bit mapper and gralloc0 module NEED it), built
-#    from the pinned minigbm 16844ba + nvidia-prolapse/gralloc/minigbm/0001-*.patch: CPU usage no
+#    from the pinned minigbm 16844ba + the driver's gralloc/minigbm/0001-*.patch: CPU usage no
 #    longer forces LINEAR on GPU render targets, so a CPU-mapped render target (SurfaceFlinger's
 #    screenshot buffer, usage 0xb33) is block-linear, which NVIDIA's GLES can render into; the
 #    backend's lock/unlock give the CPU a linear copy. Measured 2026-10-11: with the image's
@@ -958,19 +958,19 @@ def _check_abi_tree(staging, sub, shims, v, bits):
     hwdir = os.path.join(libdir, "hw")
     if not os.path.isdir(hwdir):
         raise OSError("NVIDIA native mode: {} is missing; the{} Vulkan HAL lives there "
-                      "(build nvidia-prolapse/hal, then {})".format(hwdir, what, DEPLOY))
+                      "(build <driver checkout>/hal, then {})".format(hwdir, what, DEPLOY))
     hal = os.path.join(libdir, HAL)
     if not os.path.isfile(hal):
-        raise OSError("NVIDIA native mode: the{} Vulkan HAL {} is missing (build nvidia-prolapse/hal{}, "
+        raise OSError("NVIDIA native mode: the{} Vulkan HAL {} is missing (build <driver checkout>/hal{}, "
                       "then {})".format(what, hal, " (android32)" if is32 else "", DEPLOY))
     wrapper = os.path.join(libdir, GBM_WRAPPER)
     if not os.path.isfile(wrapper):
         if is32:
             raise OSError("NVIDIA native mode: the 32-bit gralloc backend {} is missing; without it the image's "
                           "32-bit processes (mediaserver: video playback) map NVIDIA buffers through the stock "
-                          "Mesa wrapper and crash (build: make -C nvidia-prolapse/gralloc android32, then "
+                          "Mesa wrapper and crash (build: make -C <driver checkout>/gralloc android32, then "
                           "{})".format(wrapper, DEPLOY))
-        raise OSError("NVIDIA native mode: the gralloc backend {} is missing (build nvidia-prolapse/gralloc, "
+        raise OSError("NVIDIA native mode: the gralloc backend {} is missing (build <driver checkout>/gralloc, "
                       "then {})".format(wrapper, DEPLOY))
     core = os.path.join(libdir, MINIGBM_CORE)
     if not os.path.isfile(core) or _elf_class(core) != (32 if is32 else 64):
@@ -978,17 +978,17 @@ def _check_abi_tree(staging, sub, shims, v, bits):
             raise OSError("NVIDIA native mode: {} is missing or not an ELF32 library; it is minigbm's gbm_mesa "
                           "core with our patches for the image's 32-bit mapper, without it 32-bit CPU locks "
                           "pass no access flags and a read lock writes block-linear buffers back (build: make "
-                          "-C nvidia-prolapse/gralloc minigbm check-minigbm, then {})".format(core, DEPLOY))
+                          "-C <driver checkout>/gralloc minigbm check-minigbm, then {})".format(core, DEPLOY))
         raise OSError("NVIDIA native mode: {} is missing or not an ELF64 library; it is minigbm's gbm_mesa "
                       "core with our patch (CPU usage does not force LINEAR on GPU render targets), without "
                       "it SurfaceFlinger's screenshot buffers are LINEAR, which NVIDIA's GLES cannot render "
-                      "into (build: make -C nvidia-prolapse/gralloc minigbm check-minigbm, then {})".format(
+                      "into (build: make -C <driver checkout>/gralloc minigbm check-minigbm, then {})".format(
                           core, DEPLOY))
     libdrm = os.path.join(libdir, LIBDRM)
     if not os.path.isfile(libdrm):
         raise OSError("NVIDIA native mode: {} is missing; without it NVIDIA's ICD does not "
                       "advertise VK_EXT_external_memory_dma_buf and the Vulkan HAL cannot offer "
-                      "VK_ANDROID_native_buffer (build: make -C nvidia-prolapse/libdrm{}, then "
+                      "VK_ANDROID_native_buffer (build: make -C <driver checkout>/libdrm{}, then "
                       "{})".format(libdrm, " ARCH=x86" if is32 else "", DEPLOY))
     return libdir
 
@@ -1065,15 +1065,15 @@ def _check_egl_tree(root, sub, bits, angle_root):
 
 SOURCE_RM_MANIFEST = "source-rm.json"
 # Format 3 = format 2 + a mandatory "media" record: either the Codec2 NVDEC decoder
-# (nvidia-prolapse/media) staged and gated, or an explicit opt-out with a reason. Format 2 roots
+# (the driver's media/) staged and gated, or an explicit opt-out with a reason. Format 2 roots
 # predate the media component (their format number says so) and stay valid without it.
 SOURCE_RM_FORMAT = 3
 SOURCE_RM_FORMATS = (2, 3)
 SOURCE_RM_TOOL = "sudo python3 dev/source-native"   # run from the waydroid-nvidia-prolapse checkout
 SOURCE_RM_BACKUPS = "/var/lib/waydroid/before-source-native-*"
 
-# Codec2 NVDEC decoder (nvidia-prolapse/media). The vendor Codec2 runtime libraries the image lacks
-# (nvidia-prolapse/media/vndk/build.sh) live in vendor_extra/lib64 (vendor default namespace search
+# Codec2 NVDEC decoder (the driver's media/). The vendor Codec2 runtime libraries the image lacks
+# (the driver's media/vndk/build.sh) live in vendor_extra/lib64 (vendor default namespace search
 # path, reached through the vendor_extra rbind). The service and its init/VINTF/seccomp/codec files
 # live in <root>/odm, which replaces the guest's /vendor/odm (LineageOS 20: /odm/* are symlinks to
 # /vendor/odm/*, and vendor.img's /odm holds only etc/{build.prop,group,passwd}, copied unchanged).
@@ -1097,11 +1097,11 @@ MEDIA_ODM_FILES = (
     MEDIA_XML,
 )
 ODM_ORIGINALS = ("build.prop", "group", "passwd")                # vendor.img /odm/etc, unchanged
-MEDIA_STAGE = "{} stage NEWROOT (builds: nvidia-prolapse/media/vndk/build.sh, its service stage, " \
-              "make -C nvidia-prolapse/media test)".format(SOURCE_RM_TOOL)
+MEDIA_STAGE = "{} stage NEWROOT (builds: <driver checkout>/media/vndk/build.sh, its service stage, " \
+              "make -C <driver checkout>/media test)".format(SOURCE_RM_TOOL)
 
 
-# Our own GLES driver nvrm (driver-source native/mesa/ANDROID-GL.md, the guest integration contract).
+# Our own GLES driver nvrm (the driver's mesa/ANDROID-GL.md, the guest integration contract).
 # Per graphics ABI: lib{EGL,GLESv1_CM,GLESv2}_nvrm.so in the staged egl directory (Android 13's loader
 # opens lib*_<ro.hardware.egl>.so only from /vendor/<lib>/egl or /system/<lib>/egl, see above) and
 # libgallium_dri_nvrm.so in vendor_extra/<lib> (DT_NEEDED of all three; not /vendor/<lib>, where the
@@ -1112,9 +1112,8 @@ NVRM_EGL = "nvrm"
 NVRM_EGL_LIBS = tuple(n.format(NVRM_EGL) for n in EGL_LIBS)
 NVRM_GALLIUM = "libgallium_dri_nvrm.so"
 ABI_DIRS = {"x86_64": ("lib64", 64), "x86": ("lib", 32)}
-NATIVE_GL_BUILD = ("PROLAPSE_ROOT=<checkout> python3 nvidia-prolapse/driver-source/native/mesa/build.py --gl "
-                   "--target both --rust-profile release, from the driver-source checkout NVK's "
-                   "libnv_bionic_native.so is built from")
+NATIVE_GL_BUILD = ("python3 <driver checkout>/mesa/build.py --gl --target both --rust-profile release, in the driver "
+                   "checkout NVK's libnv_bionic_native.so is built from")
 NATIVE_GL_STAGE = "build the GL driver ({}), then {} stage NEWROOT and activate NEWROOT".format(
     NATIVE_GL_BUILD, SOURCE_RM_TOOL)
 
@@ -1225,7 +1224,7 @@ def media_enabled(manifest):
 # back ahead of c2.android.* and keep both behind the hardware decoders. Measured 2026-10-14 in the
 # guest (process-local MediaCodecList): vp9/av1/hevc/avc -> c2.nvprolapse.* first, software types
 # (aac, mp3, mpeg4, vp8) -> OMX.google.* first as with ccodec=0, c2.android.* listed last.
-# Runtime route switch read by the Codec2 service on every list/create (nvidia-prolapse/media
+# Runtime route switch read by the Codec2 service on every list/create (the driver's media/
 # c2/NvC2Component.h kRouteProp): unset/on -> c2.nvprolapse.*, off -> the image's software decoders.
 DECODE_ROUTE_PROPERTY = "persist.waydroid.nvidia_video_decode"
 MEDIA_BASE_PROPERTIES = (

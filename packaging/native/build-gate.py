@@ -12,12 +12,13 @@ GPU and kernel module against the shipped payload:
     vk-compute      tools/native-vulkan-probe.c        (compute + copy, --negative)
     vk-graphics     tools/native-vulkan-offscreen.c    (triangle -> tiled image -> readback)
     vk-interop      tools/native-vulkan-interop.c      (dma-buf + sync-fd between two devices)
-    anb-roundtrip, astc-roundtrip, etc2-roundtrip   nvidia-prolapse/hal tests (native/mesa/build-hal-tests.py output)
-    gl-triangle     native/mesa/tests/gl-g0b-triangle.c   (ES 3.0 clear/triangle/quad + readback)
-    gl-dmabuf       native/mesa/tests/gl-dmabuf.c         (-DNVRM_NO_VULKAN; EGL dma-buf + native fences)
-    gl-skia-shaders native/mesa/tests/gl-skia-shaders.c   (SurfaceFlinger RenderEngine shader features)
-    gl-yuv          native/mesa/tests/gl-yuv.c            (NV12/P010 EGLImage import + external sampling)
-    nvc2-xmlgen     nvidia-prolapse/media (android only)  (Codec2 caps xml from the GPU, bionic build)
+    anb-roundtrip, astc-roundtrip, etc2-roundtrip   the driver's Vulkan HAL tests (hal/build-nvk-tests.py output)
+    gl-triangle     <driver>/mesa/tests/gl-g0b-triangle.c   (ES 3.0 clear/triangle/quad + readback)
+    gl-dmabuf       <driver>/mesa/tests/gl-dmabuf.c         (-DNVRM_NO_VULKAN; EGL dma-buf + native fences)
+    gl-skia-shaders <driver>/mesa/tests/gl-skia-shaders.c   (SurfaceFlinger RenderEngine shader features)
+    gl-yuv          <driver>/mesa/tests/gl-yuv.c            (NV12/P010 EGLImage import + external sampling)
+    nvc2-xmlgen     <driver>/media (android only)           (Codec2 caps xml from the GPU, bionic build)
+  <driver> = the driver checkout build-native.sh built (tools/driver_source.py).
   OUT/data/         generate.spv transform.spv vertex.spv fragment.spv (glslangValidator, spirv-val)
   OUT/ref/          ref-flat.rgba ref-grad.rgba skia/   llvmpipe references (host Mesa, surfaceless),
                     exactly what gl-android-smoke.py renders on the developer host before comparing
@@ -32,13 +33,15 @@ import subprocess
 import sys
 
 REPO = Path(__file__).resolve().parents[2]
-NATIVE = REPO / 'nvidia-prolapse/driver-source/native'
-TESTS = NATIVE / 'mesa/tests'
+sys.path.insert(0, str(REPO / 'tools'))
+import driver_source  # noqa: E402
+DRIVER = driver_source.checkout()
+TESTS = DRIVER / 'mesa/tests'
 NDK = REPO / 'build/hwcomposer-work/ndk/android-ndk-r29/toolchains/llvm/prebuilt/linux-x86_64/bin'
 TARGETS = {'android': ('x86_64-linux-android', 'lib64', 64), 'android32': ('i686-linux-android', 'lib', 32)}
 WARN = ['-std=c11', '-Wall', '-Wextra', '-Werror']
-sys.path.insert(0, str(REPO / 'tools'))
-import native_rust_profile as profiles  # noqa: E402
+sys.path.insert(0, str(DRIVER / 'tools'))
+import native_rust_profile as profiles  # noqa: E402  (the driver's own Rust build records)
 
 
 def run(*cmd, **kw):
@@ -74,7 +77,7 @@ def main():
     for stage, name in (('vert', 'vertex'), ('frag', 'fragment')):
         run('glslangValidator', '-V', shaders / f'offscreen.{stage}', '-o', data / f'{name}.spv')
         run('spirv-val', data / f'{name}.spv')
-    mesa_include = must(REPO / 'build/mesa-gl-source/include')
+    mesa_include = must(DRIVER / 'build/mesa-gl-source/include')
     for target, (triple, sub, bits) in TARGETS.items():
         cc = must(NDK / f'{triple}33-clang')
         cxx = must(NDK / f'{triple}33-clang++')
@@ -83,9 +86,9 @@ def main():
         for exe, source in (('vk-compute', 'native-vulkan-probe.c'), ('vk-graphics', 'native-vulkan-offscreen.c'),
                             ('vk-interop', 'native-vulkan-interop.c')):
             run(cc, *WARN, REPO / 'tools' / source, '-ldl', '-o', bindir / exe)
-        for exe in ('anb-roundtrip', 'astc-roundtrip', 'etc2-roundtrip'):   # native/mesa/build-hal-tests.py, same NDK
-            shutil.copyfile(must(REPO / 'build/source-native-integration' / target / exe), bindir / exe)
-        nvrm = REPO / f'build/nvrm-{target}'
+        for exe in ('anb-roundtrip', 'astc-roundtrip', 'etc2-roundtrip'):   # the driver's hal/build-nvk-tests.py
+            shutil.copyfile(must(DRIVER / 'build/source-native-integration' / target / exe), bindir / exe)
+        nvrm = DRIVER / f'build/nvrm-{target}'
         link = [f'-L{must(nvrm / "src/egl/libEGL_nvrm.so").parent}',
                 f'-L{must(nvrm / "src/mesa/glapi/es2api/libGLESv2_nvrm.so").parent}', '-lEGL_nvrm', '-lGLESv2_nvrm']
         run(cc, *WARN, TESTS / 'gl-g0b-triangle.c', *link, '-o', bindir / 'gl-triangle')
@@ -95,10 +98,10 @@ def main():
         run(cc, *WARN, f'-I{mesa_include}', f'-I{mesa_include / "drm-uapi"}', TESTS / 'gl-yuv.c', *link,
             '-lm', '-ldl', '-o', bindir / 'gl-yuv')
         if target == 'android':
-            rust = profiles.rust_library(REPO, 'android', 'release')
-            run('make', '-B', '-C', REPO / 'nvidia-prolapse/media', 'xmlgen-android',
+            rust = profiles.rust_library(DRIVER, 'android', 'release')
+            run('make', '-B', '-C', DRIVER / 'media', 'xmlgen-android',
                 f'NDK_CXX={cxx}', f'NV_VIDEO_ANDROID_LIB=-L{must(rust).parent} -lnv_bionic_native')
-            shutil.copyfile(REPO / 'nvidia-prolapse/media/out/android/nvc2-xmlgen', bindir / 'nvc2-xmlgen')
+            shutil.copyfile(DRIVER / 'media/out/android/nvc2-xmlgen', bindir / 'nvc2-xmlgen')
         for exe in bindir.iterdir():
             elf_check(exe, bits)
             exe.chmod(0o755)

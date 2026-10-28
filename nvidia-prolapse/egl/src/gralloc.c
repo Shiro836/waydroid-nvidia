@@ -2,7 +2,7 @@
  * (eglPlatformImportColorBufferNVX, EGL_LINUX_DMA_BUF_EXT).
  *
  * The buffer handle is minigbm's struct cros_gralloc_handle; the layout header is shared with the
- * Vulkan HAL (nvidia-prolapse/hal/include/minigbm/cros_gralloc_handle.h, pinned minigbm 16844ba),
+ * Vulkan HAL (the driver's hal/include/minigbm/cros_gralloc_handle.h, pinned minigbm 16844ba),
  * and so is its validity check (cros_gralloc_handle_mismatch). */
 #include <stdio.h>
 #include <string.h>

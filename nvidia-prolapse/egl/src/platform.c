@@ -164,7 +164,7 @@ static EGLBoolean nvnInitializeDisplay(EplPlatformData *plat, EplDisplay *pdpy, 
     const char *ext = plat->egl.QueryString(idpy, EGL_EXTENSIONS);
     static const struct { const char *name, *remedy; } need[] = {
         {"EGL_ANDROID_native_fence_sync", "the driver drops it when libdrm.so.2 cannot be loaded: put the bionic "
-                                          "libdrm (nvidia-prolapse/libdrm) next to libEGL_nvidia.so.0"},
+                                          "libdrm.so.2 the driver builds next to libEGL_nvidia.so.0"},
         {"EGL_KHR_wait_sync", "driver too old"},
         {"EGL_EXT_image_dma_buf_import", "the NVIDIA render node must be visible and libdrm.so.2 loadable"},
         {"EGL_EXT_image_dma_buf_import_modifiers", "the NVIDIA render node must be visible and libdrm.so.2 loadable"},

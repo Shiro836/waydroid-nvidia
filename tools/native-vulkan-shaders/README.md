@@ -38,11 +38,11 @@ extracted Android linker, both executable and driver paths must be absolute:
 
 ```sh
 repo=$(pwd)
-native="$repo/nvidia-prolapse/driver-source/native"
-NV_NATIVE_COMPILER_PATH="$native/target/x86_64-linux-android/release/libnv_native_nak.so" \
-LD_LIBRARY_PATH="$native/runtime/lib64:$repo/build/nvk-android/runtime:$repo/build/hwcomposer-work/deps/image-rootfs/system/lib64" "$native/runtime/linker64" \
+driver=$(python3 tools/driver_source.py path)    # the driver checkout, built
+NV_NATIVE_COMPILER_PATH="$driver/build/nak-android/src/nouveau/native-bridge/libnv_native_nak.so" \
+LD_LIBRARY_PATH="$driver/build/bionic-runtime64/lib64:$driver/build/nvk-android/runtime:$driver/build/android-work/deps/image-rootfs/system/lib64" "$driver/build/bionic-runtime64/linker64" \
   "$repo/build/native-vulkan-probe/probe-android" \
-  --driver "$native/target/x86_64-linux-android/release/libnv_bionic_native.so" \
+  --driver "$driver/build/nv-rm-rust/x86_64-linux-android/release/libnv_bionic_native.so" \
   --shader "$repo/build/native-vulkan-probe/generate.spv" \
   --transform "$repo/build/native-vulkan-probe/transform.spv"
 ```
@@ -77,7 +77,7 @@ build/native-vulkan-probe/copy-indirect-host \
 ```
 
 For Mesa ICDs exporting `vk_icdGetInstanceProcAddr`, add `--icd` to direct
-invocations. `../native-vulkan-regression.py` prepares the current full-NVK
+invocations. The driver checkout's `tests/vulkan/run.py` prepares the current full-NVK
 compute, graphics, interop, host copy-indirect and HAL commands, and defaults to a dry run.
 
 The probe selects a physical device by NVIDIA vendor ID and a queue by its

@@ -30,9 +30,14 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
+import sys
 import time
 
 REPO = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPO / 'tools'))
+import driver_source  # noqa: E402
+# the driver's media/ files the media cases run (a checkout's, or the packaged bundle's driver/)
+MEDIA = driver_source.checkout() / 'media'
 BUNDLE = Path('/usr/lib/waydroid-nvidia/native/release')
 LOG_ROOT = Path('/var/lib/waydroid-nvidia')
 RECORD = 'BUILD-RECORD.json'
@@ -44,7 +49,7 @@ RUNTIME_ROOTS = ('libcutils.so', 'libhardware.so', 'liblog.so', 'libsync.so', 'l
 BIONIC = ('libc.so', 'libm.so', 'libdl.so', 'libdl_android.so')
 CASE_TIMEOUT = 600
 # nvc2-xmlgen's exit status for a GPU on which the Codec2 decoder drives no codec (no NVDEC class it knows, or a
-# class with no codec supported on it): a capability gap, not a failure (nvidia-prolapse/media/core/nvc2_caps.h
+# class with no codec supported on it): a capability gap, not a failure (the driver's media/core/nvc2_caps.h
 # kExitNoNvdec)
 XMLGEN_NO_NVDEC = 3
 REMEDY_BUNDLE = 'reinstall the package (Arch: pacman -S waydroid-nvidia-bin; other distros: packaging/install.sh)'
@@ -408,20 +413,20 @@ def media_case(gate, sn, native, vendor_img):
         record['steps'].append({'step': name, 'exit': proc.returncode, 'seconds': round(time.monotonic() - t0, 2)})
         if proc.returncode != 0:
             raise RuntimeError(f'media gate FAILED at {name} (exit {proc.returncode}); log {log}\n' + proc.stdout[-3000:])
-    record['steps'].append({'step': 'host-tests', 'exit': 0, 'note': 'run at build time (CI: make -C nvidia-prolapse/media test)'})
-    step('stage-odm', 'bash', REPO / 'nvidia-prolapse/media/stage-odm.sh', odm, vendor_img, service, wrapper)
+    record['steps'].append({'step': 'host-tests', 'exit': 0, 'note': 'run at build time (the driver build: make -C media test)'})
+    step('stage-odm', 'bash', MEDIA / 'stage-odm.sh', odm, vendor_img, service, wrapper)
     xml = workdir / native.MEDIA_XML
     step('xmlgen-check', wrapper, '--check', xml)
     # Decode every advertised codec on the real GPU (the gate runs as root; /dev/dma_heap/system is
     # root-only). A caps-only check cannot see a decode regression.
-    host_rust = REPO / 'build/nv-rm-rust/release/libnv_bionic_native.so'
+    host_rust = driver_source.checkout() / 'build/nv-rm-rust/release/libnv_bionic_native.so'
     if not host_rust.is_file():
         raise RuntimeError(f'{host_rust} missing: the media gate cannot decode without the GNU host build '
-                           'of the nv_video backend (build native/mesa --rust-profile release)')
+                           'of the nv_video backend (the driver build: mesa/build.py --target host --rust-profile release)')
     smoke = [sn.SMOKE_CODECS[t] for t in sn.media_codec_types(xml) if t in sn.SMOKE_CODECS]
     if not smoke:
         raise RuntimeError(f'{xml} advertises no codec the decode smoke can drive ({sn.media_codec_types(xml)})')
-    step('decode-smoke', 'make', '-B', '-C', REPO / 'nvidia-prolapse/media', 'smoke',
+    step('decode-smoke', 'make', '-B', '-C', MEDIA, 'smoke',
          f'NV_VIDEO_LIB=-L{host_rust.parent} -lnv_bionic_native -Wl,-rpath,{host_rust.parent}',
          'CODECS=' + ' '.join(smoke))
     want = set(native.MEDIA_ODM_FILES) | {'odm/etc/' + n for n in native.ODM_ORIGINALS}
@@ -438,7 +443,7 @@ def media_case(gate, sn, native, vendor_img):
                                      [native.nvidia_render_node()])
     record.update(exit=0, finished=now(), log=str(log), closure=closure, nv_video_symbols=symbols,
                   android_backend={'path': str(rust), 'sha256': sha256(rust)})
-    media = {'enabled': True, 'component': 'nvidia-prolapse/media Codec2 NVDEC decoder',
+    media = {'enabled': True, 'component': 'nvidia-prolapse media/ Codec2 NVDEC decoder',
              'vendor_img': str(vendor_img), 'system_img': str(gate.system_img),
              'codecs': sn.media_codecs(xml), 'gate': record}
     return media, {str(p.relative_to(workdir)): p for p in sorted(odm.rglob('*')) if p.is_file()}
@@ -484,7 +489,7 @@ def media_case_image(gate, native, vendor_img):
     if not hardware:      # the tool's own line, for the user; the decision above is its exit status
         reason = next((l.split('nvc2-xmlgen: ', 1)[1] for l in gen.stdout.splitlines() if 'nvc2-xmlgen: ' in l),
                       f'hardware video decode: not available on this GPU (nvc2-xmlgen exit {XMLGEN_NO_NVDEC})')
-    step('validate-xml', ['python3', '-I', REPO / 'nvidia-prolapse/media/test/validate_xml.py',
+    step('validate-xml', ['python3', '-I', MEDIA / 'test/validate_xml.py',
                           *([] if hardware else ['--no-decoders']), xml])
     step('xmlgen-check', [*command, '--check', xml], env, ok=(0,) if hardware else (XMLGEN_NO_NVDEC,))
     if native.XMLGEN_MARK not in xml.read_text():
@@ -512,7 +517,7 @@ def media_case_image(gate, native, vendor_img):
         raise RuntimeError(f'{rust} lacks nv_video symbols the Codec2 service imports: {sorted(want - have) or "none imported"}')
     native.check_media_device_access(native.media_device_nodes())   # the render node: at every container start
     record.update(exit=0, finished=now(), log=str(log), closure={service.name: closure}, nv_video_symbols=sorted(want))
-    return {'enabled': True, 'component': 'nvidia-prolapse/media Codec2 NVDEC decoder (vendor image)',
+    return {'enabled': True, 'component': 'nvidia-prolapse media/ Codec2 NVDEC decoder (vendor image)',
             'xml': str(xml), 'xml_sha256': sha256(xml), 'codecs': media_codecs(xml), 'gate': record,
             'hardware_decode': hardware, 'reason': reason,
             # The vendor-image path has no GNU host build of the backend to link a decoder against;

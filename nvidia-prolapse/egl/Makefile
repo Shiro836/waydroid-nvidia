@@ -90,8 +90,12 @@ $(GEN)/front_entries.h: $(GEN)/egl_entries.in tools/gen-front-entries.py
 
 # Path-independent output (the same bytes from any checkout path).
 HERE       := $(patsubst %/,%,$(dir $(abspath $(lastword $(MAKEFILE_LIST)))))
-PREFIX_MAP := -ffile-prefix-map=$(HERE)=nvidia-prolapse/egl
-HAL_INC    := -I../hal/include/android -I../hal/include/minigbm
+PREFIX_MAP = -ffile-prefix-map=$(HERE)=nvidia-prolapse/egl -ffile-prefix-map=$(DRIVER)=nvidia-prolapse-driver
+# the Vulkan HAL's pinned AOSP/minigbm headers and the gralloc backend live in the driver repository
+# (../../tools/driver_source.py: build/nvidia-prolapse-src, or NVIDIA_PROLAPSE_SRC / DRIVER=<checkout>)
+DRIVER     ?= $(shell python3 $(HERE)/../../tools/driver_source.py path)
+HAL        := $(DRIVER)/hal
+HAL_INC    := -I$(HAL)/include/android -I$(HAL)/include/minigbm
 COMMON := -std=gnu11 -D_GNU_SOURCE -DHAVE_TYPEOF -fPIC -fvisibility=hidden -O2 -g $(PREFIX_MAP) -Wall -Wextra -Werror \
           -Wno-unused-parameter -Wno-missing-field-initializers -Wno-sign-compare \
           -Iinclude -Isrc -I$(GEN)/eplbase -I$(GEN)/include -I$(GEN) $(HAL_INC)
@@ -100,7 +104,7 @@ BASE_FLAGS := -std=gnu11 -D_GNU_SOURCE -DHAVE_TYPEOF -fPIC -fvisibility=hidden -
               -I$(GEN)/eplbase -I$(GEN)/include
 LDSO := -shared -Wl,-z,defs -Wl,--no-undefined
 PLAT_SRCS := src/platform.c src/window.c src/gralloc.c
-HDRS := src/nvn.h include/nvn_android.h ../hal/include/minigbm/cros_gralloc_handle.h
+HDRS := src/nvn.h include/nvn_android.h $(HAL)/include/minigbm/cros_gralloc_handle.h
 
 # per-target toolchain settings
 host_CC := $(HOSTCC)
@@ -148,8 +152,8 @@ out/host-amplify/libnvnative-egl-android.so: $(PLAT_SRCS) $(HDRS) $(addprefix ou
 	    -o $@ $(PLAT_SRCS) $(addprefix out/host/base/,$(BASE_SRCS:.c=.o)) $(host_LIBS)
 
 # ---- tests ----
-GRALLOC := ../gralloc
-out/host/host-window: test/host-window.c include/nvn_android.h ../hal/include/minigbm/cros_gralloc_handle.h $(GEN_FILES)
+GRALLOC := $(DRIVER)/gralloc
+out/host/host-window: test/host-window.c include/nvn_android.h $(HAL)/include/minigbm/cros_gralloc_handle.h $(GEN_FILES)
 	@mkdir -p $(@D)
 	$(HOSTCC) -std=gnu11 -D_GNU_SOURCE -O1 -g $(PREFIX_MAP) -Wall -Wextra -Werror -Wno-unused-parameter \
 	    $(host_CFLAGS) -Iinclude $(HAL_INC) -I$(GRALLOC)/include -o $@ test/host-window.c -ldl -lpthread
@@ -257,7 +261,7 @@ STRESS_CONSUMERS ?= gl-write gl-read vk-write vk-read cpu
 STRESS_PLATFORM ?= normal
 stress_plat = $(if $(filter amplify,$(STRESS_PLATFORM)),out/host-amplify,out/host)/libnvnative-egl-android.so
 stress: host out/host-amplify/libnvnative-egl-android.so $(GRALLOC)/out/host/libgbm_mesa_wrapper.so
-	$(MAKE) -C ../hal out/host/vulkan.nvidia.so
+	$(MAKE) -C $(HAL) out/host/vulkan.nvidia.so
 	@fail=0; for c in $(STRESS_CONSUMERS); do ./tools/host-window-stress.sh --platform-lib $(stress_plat) --consumer $$c \
 	    --runs $(STRESS_RUNS) --jobs $(STRESS_JOBS) --process mix || fail=1; done; exit $$fail
 

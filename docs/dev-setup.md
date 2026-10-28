@@ -6,8 +6,14 @@ on your machine, switch modes, run CI.
 ## Build
 
 ```sh
-packaging/native/build-native.sh [OUT]
+packaging/native/build-native.sh [--driver-src DIR] [OUT]
 ```
+
+The driver (NVK over the Rust RM backend, `nvrm`, the Vulkan HAL, gralloc, the Codec2 decoder, bionic libdrm) is
+[nvidia-prolapse](https://github.com/Shiro836/nvidia-prolapse), built by its own `build.sh`. The build fetches the
+commit `NVIDIA_PROLAPSE_REF` in `vendor-image/pins.env` names into `build/nvidia-prolapse-src` and checks it.
+`--driver-src DIR` (or `NVIDIA_PROLAPSE_SRC=DIR` for `dev/source-native` and the other tools) builds your own
+checkout instead; `BUILD-RECORD.json` names the driver commit and whether it had local changes.
 
 This builds the whole native stack the way CI does, inside the pinned container `packaging/native/Containerfile`
 (needs docker). It ends with the install-time test programs and the release bundle (`payload/`, `gate/`,

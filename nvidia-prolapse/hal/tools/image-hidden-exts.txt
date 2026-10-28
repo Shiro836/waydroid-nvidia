@@ -1,9 +1,0 @@
-# Device extensions with a command that takes a VkImage (directly, in a struct, or through a pNext
-# struct) and that this HAL does NOT translate for AHB wrapper images. tools/vkimage-coverage.py
-# fails the build when such a command is neither intercepted in src/hal.c nor listed here; the
-# extensions listed here are hidden from vkEnumerateDeviceExtensionProperties (gen/nvhal_gen.c).
-# Format: <extension> <reason>
-VK_KHR_swapchain WSI: already hidden by device.c (the Android loader implements VK_KHR_swapchain over VK_ANDROID_native_buffer); vkGetSwapchainImagesKHR returns images
-VK_EXT_metal_objects Apple Metal interop (VkExportMetalTextureInfoEXT.image); not on this platform, the NVIDIA ICD does not offer it
-VK_EXT_frame_boundary VkFrameBoundaryEXT.pImages (pNext of VkSubmitInfo/VkSubmitInfo2/VkBindSparseInfo) for capture tools; the NVIDIA ICD does not offer it
-VK_FUCHSIA_buffer_collection Fuchsia sysmem buffer collections (carry VkImageCreateInfo/VkBufferCreateInfo); not on this platform

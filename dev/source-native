@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Stage/adopt/check/activate the local source NVK + Rust RM stack for Waydroid.
 
-Build the native/mesa targets first. Staging runs the source-native
+Build the driver first (packaging/native/build-native.sh). Staging runs the source-native
 regression gate on the exact build/ bytes it copies and stamps the manifest
 (format 2) with that gate and the NVIDIA kernel module it ran on; the LXC
 generator refuses any other module. No NVIDIA userspace enters the tree.
@@ -56,6 +56,11 @@ import time
 
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / 'tools'))
+import driver_source
+# The driver checkout the native stack is built in (tools/driver_source.py): its build/ holds NVK, the Rust
+# RM backend, nvrm, the HAL, gralloc and the Codec2 outputs, and its tools/ the Rust build records.
+DRIVER = driver_source.checkout()
+sys.path.insert(0, str(DRIVER / 'tools'))
 import native_rust_profile as profiles
 
 CFG = Path('/var/lib/waydroid/waydroid.cfg')
@@ -67,7 +72,7 @@ HOOK = Path('/etc/pacman.d/hooks/90-waydroid-nvidia-prolapse.hook')
 PACKAGED_HOOK = Path('/usr/share/libalpm/hooks/90-waydroid-nvidia-prolapse.hook')
 LEGACY_SETUP = '/usr/bin/waydroid-nvidia-prolapse-setup'
 PYTHON = '/usr/bin/python3'
-RUNNER = REPO / 'tools/native-vulkan-regression.py'
+RUNNER = DRIVER / 'tests/vulkan/run.py'   # its programs: <driver>/tests/vulkan/build.py
 RUNNER_ARGS = ('--run', '--target', 'all', '--suite', 'all')
 LXC_PATH = ('-P', '/var/lib/waydroid/lxc', '-n', 'waydroid')
 UNIT = 'waydroid-container.service'
@@ -78,8 +83,8 @@ FORBIDDEN_MAPS = ('libnvidia-', 'libEGL_nvidia', 'libnvglibc')
 REQUIRED_MAPS = ('libvulkan_nouveau.so', 'libnv_bionic_native.so')
 NVRM_REQUIRED_MAPS = ('libgallium_dri_nvrm.so', 'libnv_bionic_native.so')
 MANIFEST = 'source-rm.json'   # == nvidia_native.SOURCE_RM_MANIFEST; the hook works without that module
-MEDIA = REPO / 'nvidia-prolapse/media'
-MEDIA_OUT = REPO / 'build/media-c2/out'
+MEDIA = DRIVER / 'media'
+MEDIA_OUT = DRIVER / 'build/media-c2/out'
 MEDIA_SERVICE_BIN = MEDIA_OUT / 'bin/android.hardware.media.c2@1.2-service-nvprolapse'
 IMAGES = Path('/var/lib/waydroid/images')
 VNDK_APEX = '/system/apex/com.android.vndk.current/lib64'
@@ -353,15 +358,15 @@ def stage_sources(rust_profile='dev'):
         ('lib64', 'android', 'x86_64'),
         ('lib', 'android32', 'x86'),
     ):
-        base = REPO / 'build/source-native-integration' / target
+        base = DRIVER / 'build/source-native-integration' / target
         vendor = f'vendor_extra/{sub}'
         sources[f'{vendor}/hw/vulkan.nvidia.so'] = base / 'vulkan.nvidia.so'
-        sources[f'{vendor}/libvulkan_nouveau.so'] = REPO / f'build/nvk-{target}/src/nouveau/vulkan/libvulkan_nouveau.so'
-        sources[f'{vendor}/libnv_bionic_native.so'] = profiles.rust_library(REPO, target, rust_profile)
+        sources[f'{vendor}/libvulkan_nouveau.so'] = DRIVER / f'build/nvk-{target}/src/nouveau/vulkan/libvulkan_nouveau.so'
+        sources[f'{vendor}/libnv_bionic_native.so'] = profiles.rust_library(DRIVER, target, rust_profile)
         sources[f'{vendor}/libgbm_mesa_wrapper.so'] = base / 'libgbm_mesa_wrapper.so'
-        sources[f'{vendor}/libdrm.so.2'] = REPO / f'build/libdrm/build-android33-{drm}/libdrm.so'
-        # minigbm core built from pinned source + nvidia-prolapse/gralloc/minigbm/000*.patch (0004: NV12/P010 layout)
-        sources[f'{vendor}/libminigbm_gralloc_gbm_mesa.so'] = REPO / 'nvidia-prolapse/gralloc/out' / target / 'libminigbm_gralloc_gbm_mesa.so'
+        sources[f'{vendor}/libdrm.so.2'] = DRIVER / f'build/libdrm/build-android33-{drm}/libdrm.so'
+        # minigbm core built from pinned source + the driver's gralloc/minigbm/000*.patch (0004: NV12/P010 layout)
+        sources[f'{vendor}/libminigbm_gralloc_gbm_mesa.so'] = DRIVER / 'gralloc/out' / target / 'libminigbm_gralloc_gbm_mesa.so'
         for name in native.EGL_ANGLE:
             rel = f'vendor/{sub}/egl/{name}'
             sources[rel] = Path('/var/lib/waydroid/nv/guest') / rel
@@ -394,10 +399,10 @@ def gate_coverage(sources, rust_profile='dev'):
     runner = _load(RUNNER, 'native_vulkan_regression')
     loaded = set()
     for target in ('host', 'android', 'android32'):
-        profiles.verify_metadata(REPO, target, rust_profile)
+        profiles.verify_metadata(DRIVER, target, rust_profile)
         if target != 'host':
             sub = 'lib64' if target == 'android' else 'lib'
-            selected = profiles.rust_library(REPO, target, rust_profile)
+            selected = profiles.rust_library(DRIVER, target, rust_profile)
             recorded = sources.get(f'vendor_extra/{sub}/libnv_bionic_native.so')
             if recorded is None or Path(recorded).resolve() != selected.resolve():
                 raise RuntimeError(f'Stage/gate Rust source differs from selected {rust_profile}: {recorded}; expected {selected}')
@@ -431,11 +436,11 @@ def _runner_user():
 
 
 def run_gate(sources, rust_profile='dev'):
-    """Run tools/native-vulkan-regression.py --run on every target and suite; return the record."""
+    """Run the driver's tests/vulkan/run.py --run on every target and suite; return the record."""
     kernel = native.driver_version()
     exercised, not_exercised = gate_coverage(sources, rust_profile)
     stamp = time.strftime('%Y%m%d-%H%M%S')
-    logs = REPO / 'build/native-vulkan-regression' / f'gate-{stamp}'
+    logs = REPO / 'build/vulkan-gate' / f'gate-{stamp}'
     cmd = [PYTHON, str(RUNNER), *RUNNER_ARGS, '--rust-profile', rust_profile, '--logs', str(logs)]
     user = _runner_user()
     env = dict(os.environ)
@@ -463,7 +468,7 @@ def run_gate(sources, rust_profile='dev'):
     after = native.driver_version()
     if after != kernel:
         raise RuntimeError(f'NVIDIA kernel module changed during the gate ({kernel} -> {after})')
-    return {'runner': ' '.join(['tools/native-vulkan-regression.py', *RUNNER_ARGS, '--rust-profile', rust_profile]),
+    return {'runner': ' '.join(['<driver>/tests/vulkan/run.py', *RUNNER_ARGS, '--rust-profile', rust_profile]),
             'rust_profile': rust_profile, 'runner_sha256': sha256(RUNNER), 'user': who, 'started': started, 'finished': now(),
             'seconds': seconds, 'exit': 0, 'kernel_module': kernel, 'log_dir': str(logs),
             'cases': cases, 'exercised': exercised, 'not_exercised': not_exercised}
@@ -472,7 +477,7 @@ def run_gate(sources, rust_profile='dev'):
 # ---------------------------------------------------------------- media gate (Codec2 NVDEC decoder)
 
 def media_sources():
-    """The vendor Codec2 runtime libraries built by nvidia-prolapse/media/vndk/build.sh."""
+    """The vendor Codec2 runtime libraries built by the driver's media/vndk/build.sh."""
     return {f'vendor_extra/lib64/{n}': MEDIA_OUT / 'lib64' / n for n in native.MEDIA_LIBS}
 
 
@@ -485,18 +490,18 @@ def media_staleness():
     record of their own; this refuses the obvious stale case). Returns a list of problems."""
     vndk_inputs = [MEDIA / 'vndk/build.sh', *sorted((MEDIA / 'vndk/patches').glob('*.patch'))]
     service_inputs = vndk_inputs + sorted((MEDIA / 'core').glob('*')) + sorted((MEDIA / 'c2').glob('*')) + \
-        [REPO / 'nvidia-prolapse/driver-source/native/video/nv_video.h']
+        [DRIVER / 'rm/video/nv_video.h']
     problems = []
     for outputs, inputs, remedy in (
-            ([MEDIA_OUT / 'lib64' / n for n in native.MEDIA_LIBS], vndk_inputs, 'nvidia-prolapse/media/vndk/build.sh'),
+            ([MEDIA_OUT / 'lib64' / n for n in native.MEDIA_LIBS], vndk_inputs, f'{DRIVER}/media/vndk/build.sh'),
             ([MEDIA_SERVICE_BIN], service_inputs,
-             'NV_VIDEO_LIB_DIR=<dir of the staged x86_64 libnv_bionic_native.so> nvidia-prolapse/media/vndk/build.sh service')):
+             f'NV_VIDEO_LIB_DIR=<dir of the staged x86_64 libnv_bionic_native.so> {DRIVER}/media/vndk/build.sh service')):
         newest = max(inputs, key=_mtime)
         for out in outputs:
             if not out.is_file():
                 problems.append(f'{out} missing (build: {remedy})')
             elif _mtime(out) < _mtime(newest):
-                problems.append(f'{out} is older than {newest.relative_to(REPO)} (rebuild: {remedy})')
+                problems.append(f'{out} is older than {newest.relative_to(DRIVER)} (rebuild: {remedy})')
     return problems
 
 
@@ -544,8 +549,8 @@ def media_closure(service, libs, android_rust, system_img, vendor_img):
     have = {s for s in _nm(android_rust, '--defined-only') if s.startswith('nv_video_')}
     if not want or want - have:
         raise RuntimeError(f'Staged backend {android_rust} lacks nv_video symbols the Codec2 service imports: '
-                           f'{sorted(want - have) or "service imports none"}. Rebuild the Rust backend from a '
-                           'driver-source that includes native/video (native/mesa/build.py), then the service.')
+                           f'{sorted(want - have) or "service imports none"}. Rebuild the driver '
+                           f'({DRIVER}/build.sh), then stage again.')
     return closure, sorted(want)
 
 
@@ -567,7 +572,7 @@ SMOKE_CODECS = {'video/avc': 'h264', 'video/hevc': 'hevc', 'video/x-vnd.on2.vp9'
 def run_media_gate(rust_profile, android_rust, images=IMAGES):
     """Offline gate of the Codec2 decoder against the backend being staged. Returns (record, odm sources).
 
-    1. build outputs not older than their inputs; 2. host unit tests (make -C nvidia-prolapse/media test);
+    1. build outputs not older than their inputs; 2. host unit tests (make -C <driver>/media test);
     3. nvc2-xmlgen relinked against the host build of the SAME Rust profile and source snapshot as the
        staged Android backend; 4. stage-odm.sh builds the /odm tree (vendor.img originals, rc, VINTF,
        seccomp, media_codecs_c2.xml generated from this GPU, the service); 5. nvc2-xmlgen --check of that
@@ -579,8 +584,8 @@ def run_media_gate(rust_profile, android_rust, images=IMAGES):
         raise RuntimeError('Media build outputs stale or missing; nothing staged:\n  ' + '\n  '.join(problems))
     system_img, vendor_img = images / 'system.img', images / 'vendor.img'
     kernel = native.driver_version()
-    host_rust = profiles.rust_library(REPO, 'host', rust_profile)
-    profiles.verify_metadata(REPO, 'host', rust_profile)
+    host_rust = profiles.rust_library(DRIVER, 'host', rust_profile)
+    profiles.verify_metadata(DRIVER, 'host', rust_profile)
     user = _runner_user()
     stamp = time.strftime('%Y%m%d-%H%M%S')
     workdir = REPO / 'build/media-c2' / f'gate-{stamp}'
@@ -651,7 +656,7 @@ def run_media_gate(rust_profile, android_rust, images=IMAGES):
         raise RuntimeError(f'NVIDIA kernel module changed during the media gate ({kernel} -> {native.driver_version()})')
     record.update(exit=0, finished=now(), closure=closure, nv_video_symbols=symbols,
                   xmlgen={'path': str(xmlgen), 'runpath': runpath[0]})
-    media = {'enabled': True, 'component': 'nvidia-prolapse/media Codec2 NVDEC decoder',
+    media = {'enabled': True, 'component': 'nvidia-prolapse media/ Codec2 NVDEC decoder',
              'vendor_img': str(vendor_img), 'system_img': str(system_img),
              'codecs': media_codecs(xml), 'gate': record}
     return media, {str(p.relative_to(workdir)): p for p in sorted(odm.rglob('*')) if p.is_file()}
@@ -659,17 +664,17 @@ def run_media_gate(rust_profile, android_rust, images=IMAGES):
 
 # ---------------------------------------------------------------- native GL (our own GLES driver nvrm)
 
-NVRM_SOURCE = REPO / 'nvidia-prolapse/driver-source'
-NVRM_SMOKE = NVRM_SOURCE / 'native/mesa/tests/gl-android-smoke.py'
+NVRM_TESTS = DRIVER / 'mesa/tests'
+NVRM_SMOKE = NVRM_TESTS / 'gl-android-smoke.py'
 NDK_BIN = REPO / 'build/hwcomposer-work/ndk/android-ndk-r29/toolchains/llvm/prebuilt/linux-x86_64/bin'
-# build.py --gl --target android|android32 output paths (native/mesa/build.py GL_ANDROID_ARTIFACTS)
+# build.py --gl --target android|android32 output paths (the driver's mesa/build.py GL_ANDROID_ARTIFACTS)
 NVRM_BUILD_ARTIFACTS = {'libEGL_nvrm.so': 'src/egl', 'libGLESv1_CM_nvrm.so': 'src/mesa/glapi/es1api',
                         'libGLESv2_nvrm.so': 'src/mesa/glapi/es2api', 'libgallium_dri_nvrm.so': 'src/gallium/targets/dri'}
 NVRM_TARGETS = (('android', 'lib64', 'x86_64', 'x86_64-linux-android'), ('android32', 'lib', 'x86', 'i686-linux-android'))
 
 
 def nvrm_build_dirs(suffix=''):
-    return {target: REPO / f'build/nvrm-{target}{suffix}' for target, *_ in NVRM_TARGETS}
+    return {target: DRIVER / f'build/nvrm-{target}{suffix}' for target, *_ in NVRM_TARGETS}
 
 
 def nvrm_staged_path(name, sub):
@@ -678,9 +683,9 @@ def nvrm_staged_path(name, sub):
 
 def _rebuild_hint(suffix, rust_profile):
     sfx = f'NVRM_GL_DIR_SUFFIX={suffix} ' if suffix else ''
-    return (f'rebuild nvrm and NVK from ONE driver-source checkout so both link the same libnv_bionic_native.so '
-            f'(python3 nvidia-prolapse/driver-source/native/mesa/build.py --target both --rust-profile {rust_profile}; '
-            f'PROLAPSE_ROOT={REPO} {sfx}python3 nvidia-prolapse/driver-source/native/mesa/build.py --gl --target both '
+    return (f'rebuild nvrm and NVK from ONE driver checkout so both link the same libnv_bionic_native.so '
+            f'(python3 {DRIVER}/mesa/build.py --target both --rust-profile {rust_profile}; '
+            f'{sfx}python3 {DRIVER}/mesa/build.py --gl --target both '
             f'--rust-profile {rust_profile}), or stage with --no-native-gl REASON')
 
 
@@ -690,10 +695,12 @@ def run_native_gl_gate(sources, rust_profile='dev', suffix=''):
     Returns (record, {staged relative path: stripped file}). No nvrm build at all -> an explicit
     {'enabled': False, 'reason': ...}; a partial/stale build, a Rust RM library other than the one
     staged for NVK, or a failing smoke test raises (nothing staged). The staged copies are the
-    build's libraries with debug info stripped (llvm-strip --strip-debug); the bionic smoke test
-    (driver-source native/mesa/tests/gl-android-smoke.py) runs against exactly those copies plus the
-    staged libnv_bionic_native.so/libdrm.so.2, through a private PROLAPSE_ROOT whose build/nvrm-* and
-    build/nv-rm-rust dirs (NVK's Rust output layout, which nvrm links) hold them (LD_LIBRARY_PATH precedes the libraries' build-tree RUNPATHs)."""
+    build's libraries with debug info stripped (llvm-strip --strip-debug); the driver's bionic smoke test
+    (mesa/tests/gl-android-smoke.py) runs against exactly those copies plus the staged
+    libnv_bionic_native.so/libdrm.so.2: a copy of the driver's mesa/tests in a private tree laid out like the
+    driver checkout (the runner resolves everything from its own location), whose build/nvrm-* and
+    build/nv-rm-rust dirs (NVK's Rust output layout, which nvrm links) hold them (LD_LIBRARY_PATH precedes the
+    libraries' build-tree RUNPATHs)."""
     builds = nvrm_build_dirs(suffix)
     records = {t: d / 'nvrm-build.json' for t, d in builds.items()}
     present = [t for t, r in records.items() if r.is_file()]
@@ -742,12 +749,14 @@ def run_native_gl_gate(sources, rust_profile='dev', suffix=''):
         build_info[abi] = {k: record.get(k) for k in ('driver_source_head', 'driver_source_dirty', 'mesa_pin',
                                                       'rust_profile')}
         build_info[abi]['build_record'] = str(records[target])
-    # Everything else the runner reaches (NDK, bionic runtimes, image libs, the test source) is the real tree.
-    for rel in ('build/hwcomposer-work', 'build/nvk-android', 'build/nvk-android32', 'nvidia-prolapse', 'tools'):
+    # The runner and its test sources are copied (it locates the tree from its own path); everything else it
+    # reaches (NDK, bionic runtimes, image libs, NVK's ICD, the Rust build records) is the real driver tree.
+    shutil.copytree(NVRM_TESTS, fake / 'mesa/tests')
+    for rel in ('build/android-work', 'build/bionic-runtime64', 'build/nvk-android', 'build/nvk-android32', 'tools'):
         (fake / rel).parent.mkdir(parents=True, exist_ok=True)
-        (fake / rel).symlink_to(REPO / rel)
+        (fake / rel).symlink_to(DRIVER / rel)
     # headers the capability test (gl-dmabuf.c) compiles against: the pinned Mesa tree nvrm was built from
-    (fake / 'build/mesa-gl-source').symlink_to(REPO / f'build/mesa-gl-source{suffix}')
+    (fake / 'build/mesa-gl-source').symlink_to(DRIVER / f'build/mesa-gl-source{suffix}')
     hashes = {rel: sha256(p) for rel, p in staged.items()}
     user = _runner_user()
     if user is not None:
@@ -756,11 +765,10 @@ def run_native_gl_gate(sources, rust_profile='dev', suffix=''):
                 os.lchown(name, user.pw_uid, user.pw_gid)
     kernel = native.driver_version()
     logs = work / 'smoke'
-    cmd = [PYTHON, str(NVRM_SMOKE), '--target', 'both', str(logs)]
+    cmd = [PYTHON, str(fake / 'mesa/tests/gl-android-smoke.py'), '--target', 'both', str(logs)]
     env = {k: v for k, v in os.environ.items() if k != 'NVRM_GL_DIR_SUFFIX'}
-    env['PROLAPSE_ROOT'] = str(fake)
     if user is not None:
-        cmd = ['runuser', '-u', user.pw_name, '--', 'env', f'PROLAPSE_ROOT={fake}', *cmd]
+        cmd = ['runuser', '-u', user.pw_name, '--', *cmd]
         env.update(HOME=user.pw_dir, USER=user.pw_name, LOGNAME=user.pw_name)
     print(f'Native GL gate: {" ".join(cmd)}', flush=True)
     started = now()
@@ -776,7 +784,7 @@ def run_native_gl_gate(sources, rust_profile='dev', suffix=''):
     if changed:
         raise RuntimeError('nvrm files changed while the native GL gate ran: ' + ', '.join(changed))
     record = {'enabled': True, 'egl': native.NVRM_EGL, 'files': hashes, 'builds': build_info,
-              'gate': {'runner': 'nvidia-prolapse/driver-source/native/mesa/tests/gl-android-smoke.py --target both',
+              'gate': {'runner': '<driver>/mesa/tests/gl-android-smoke.py --target both',
                        'runner_sha256': sha256(NVRM_SMOKE), 'started': started, 'finished': now(), 'exit': 0,
                        'kernel_module': kernel, 'log_dir': str(work), 'stripped': 'llvm-strip --strip-debug',
                        'rust_sha256': rust_sha}}
@@ -796,7 +804,7 @@ def stage(dest, rust_profile='dev', no_media=None, no_native_gl=None, nvrm_suffi
     if dest.exists():
         raise RuntimeError(f'{dest} exists; use a new staging directory')
     sources = stage_sources(rust_profile)
-    builds = {target: profiles.verify_metadata(REPO, target, rust_profile)
+    builds = {target: profiles.verify_metadata(DRIVER, target, rust_profile)
               for target in profiles.TARGETS}
     for rel, source in sources.items():
         bits = 64 if '/lib64/' in rel else 32
@@ -847,7 +855,7 @@ def stage(dest, rust_profile='dev', no_media=None, no_native_gl=None, nvrm_suffi
             if sha256(out) != gated[rel]:
                 raise RuntimeError(f'{out} differs from the gated {source}')
         for target, expected in builds.items():
-            if profiles.verify_metadata(REPO, target, rust_profile) != expected:
+            if profiles.verify_metadata(DRIVER, target, rust_profile) != expected:
                 raise RuntimeError(f'{target}: Rust build metadata changed while gating/staging; nothing stamped')
         manifest = {'format': native.SOURCE_RM_FORMAT, 'driver': 'mesa-nvk-rust-rm',
                     'mesa_commit': 'ddaf85e353442d9d7f192fdcf1823e652e3f2ee3',

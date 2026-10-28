@@ -185,10 +185,14 @@ product() {
 import hashlib, json, os, sys
 nb = sys.argv[1]
 rec = json.load(open(os.path.join(nb, "BUILD-RECORD.json")))
-bad = [p for p, h in rec["files"].items() if p.startswith("payload/")
-       and hashlib.sha256(open(os.path.join(nb, p), "rb").read()).hexdigest() != h]
+# payload/ and driver/ (the driver's media/odm files the product layer takes)
+want = {p: h for p, h in rec["files"].items() if p.startswith("payload/")}
+want.update(rec.get("driver_files") or {})
+bad = [p for p, h in want.items() if hashlib.sha256(open(os.path.join(nb, p), "rb").read()).hexdigest() != h]
+if not any(p.startswith("driver/media/odm/") for p in want):
+    sys.exit("the bundle carries no driver/media/odm files (BUILD-RECORD.json driver_files)")
 print("bundle", rec.get("release") or "-", "commit", rec["commit"], "dirty", rec["dirty"],
-      len([p for p in rec["files"] if p.startswith("payload/")]), "payload files")
+      "driver", (rec.get("driver") or {}).get("commit"), len(want), "payload + driver files")
 sys.exit(1 if bad else print("sha256 ok") or 0)
 PY
     step "install the product layer"
@@ -212,7 +216,7 @@ PY
     mkdir -p "$pre/native" "$pre/angle"
     sync_tree "$nb/payload" "$pre/native/payload"
     rsync -rlp --checksum "$nb/BUILD-RECORD.json" "$pre/native/"
-    sync_tree "$REPO/nvidia-prolapse/media/odm/etc" "$pre/media/odm/etc"   # rc, VINTF fragment, seccomp policy
+    sync_tree "$nb/driver/media/odm/etc" "$pre/media/odm/etc"   # the driver's rc, VINTF fragment, seccomp policy
     mkdir -p "$pre/angle/vendor"
     rsync -rlp --checksum --delete --include='*/' --include='lib*_angle.so' --exclude='*' "$ad/vendor/" "$pre/angle/vendor/"
     ( cd "$pre/angle" && find . -name '*.so' -exec sha256sum {} + | sort -k2 ) | write_if_changed "$pre/angle/SHA256SUMS"

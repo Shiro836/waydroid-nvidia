@@ -9,7 +9,7 @@
 #include <vulkan/vulkan.h>
 #include "compute_spv.h"
 #include <dlfcn.h>
-#include <hardware/hwvulkan.h> /* pinned AOSP copy: ../hal/include/android */
+#include <hardware/hwvulkan.h> /* pinned AOSP copy: the driver repository's hal/include/android */
 
 /* Bootstraps for the same ICD entry points:
  *   loader      : libvulkan.so.1 -> ICD manifest -> libGLX_nvidia.so.0 (NVIDIA's shipped front)
@@ -24,7 +24,7 @@
  *                 libvulkan uses for vulkan.<hw>.so. No LD_LIBRARY_PATH, no absolute path:
  *                 the ICD, its glibc-named dependencies and the shims must all be found by
  *                 the namespace's own search paths (P2 gate).
- *   --hal X     : load the Android Vulkan HAL (vulkan.<hw>.so, ../hal) the way AOSP's libvulkan
+ *   --hal X     : load the Android Vulkan HAL (vulkan.<hw>.so, the driver repository's hal/) the way AOSP's libvulkan
  *                 does (driver.cpp:189-209,271-273): host: dlopen(X); Android:
  *                 android_load_sphal_library(X). dlsym "HMI", check id "vulkan", write
  *                 HMI.common.dso, open("vk0") and use the hwvulkan_device_t's

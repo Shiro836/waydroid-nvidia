@@ -200,7 +200,7 @@ Lunch `lineage_nvidia_waydroid_x86_64-userdebug`, out dir `out-vendor-l20-prolap
   - The image ships a placeholder without codecs; the install binds the host-generated file over
     `/odm/etc/media_codecs_c2.xml`.
   - The service refuses to start while the file and the live caps differ, so a missing bind fails loudly.
-  - The release payload carries only the service binary: rc, VINTF and seccomp come from nvidia-prolapse/media/odm/etc.
+  - The release payload carries only the service binary: rc, VINTF and seccomp come from the driver's media/odm/etc (the bundle's driver/media/odm/etc).
 - `python-is-python3` in the build environment: a LineageOS lunch helper calls `python`.
 
 ## Install path for users (2026-10-16 late): the vendor image IS the nvidia-prolapse install
@@ -256,8 +256,8 @@ That `overrides` works for prebuilt vendor modules on A13 is **not verified**.
 
 | Component | Today (image dependency) | As a vendor module | APIs used (DT_NEEDED vs the image's LL-NDK / VNDK-SP / VNDK-core lists, `com.android.vndk.current/etc/*.libraries.33.txt`) |
 |---|---|---|---|
-| Vulkan HAL `vulkan.nvidia.so` (32/64) | `/vendor_extra/<lib>/hw` via the image's patched linkerconfig | Option 1: `cc_prebuilt_library_shared`, `vendor: true`, `relative_install_path: "hw"`, from CI artifacts. Option 2: `cc_library_shared` from `nvidia-prolapse/hal` sources. Lands in `/vendor/<lib>/hw` = stock sphal path | LL-NDK only (liblog, libdl, libc) |
-| NVK `libvulkan_nouveau.so`, `libnv_bionic_native.so` (Rust RM), `libdrm.so.2` | `/vendor_extra/<lib>` | Prebuilt vendor modules from the existing CI build (`native/mesa/build.py`, cargo for bionic). The A13 Soong Rust toolchain is too old for the crate: **not checked**, so prebuilt is the realistic first step. Label `same_process_hal_file` | LL-NDK + VNDK-SP libhardware; ours: libnv_bionic_native, libdrm.so.2 |
+| Vulkan HAL `vulkan.nvidia.so` (32/64) | `/vendor_extra/<lib>/hw` via the image's patched linkerconfig | Option 1: `cc_prebuilt_library_shared`, `vendor: true`, `relative_install_path: "hw"`, from CI artifacts. Option 2: `cc_library_shared` from the driver's `hal/` sources. Lands in `/vendor/<lib>/hw` = stock sphal path | LL-NDK only (liblog, libdl, libc) |
+| NVK `libvulkan_nouveau.so`, `libnv_bionic_native.so` (Rust RM), `libdrm.so.2` | `/vendor_extra/<lib>` | Prebuilt vendor modules from the existing CI build (the driver's `mesa/build.py`, cargo for bionic). The A13 Soong Rust toolchain is too old for the crate: **not checked**, so prebuilt is the realistic first step. Label `same_process_hal_file` | LL-NDK + VNDK-SP libhardware; ours: libnv_bionic_native, libdrm.so.2 |
 | nvrm GL `lib{EGL,GLESv1_CM,GLESv2}_nvrm.so` + `libgallium_dri_nvrm.so` | staged egl dir bound over `/vendor/<lib>/egl` | Prebuilt vendor modules: egl libs with `relative_install_path: "egl"`, gallium in `/vendor/<lib>`. Selected by `ro.hardware.egl` as today | LL-NDK + VNDK-SP libhardware |
 | ANGLE (our pin + ReBAR patch) | file binds of `/var/lib/waydroid/nv/guest/.../egl/*_angle.so` (Venus build's guest layout) | Official vendor already ships AOSP tm-qpr3 ANGLE (external/angle 353815e, 2023-01; `device.mk:82-84`). Ours: prebuilt from the ANGLE CI job, `stem: "libEGL_angle"` etc. + `overrides: ["libEGL_angle", ...]` | LL-NDK only |
 | gralloc: our `libgbm_mesa_wrapper.so` + patched `libminigbm_gralloc_gbm_mesa.so` | binds over `/vendor/<lib>/` files; built against minigbm 16844ba + A13 header clones + image stubs | minigbm patches 0001-0007 applied to in-tree external/minigbm (e5a7769, which already carries "Fix YVU420"), built by Soong; the wrapper replaces `external/minigbm/gbm_mesa_driver/Android.mk:33` `libgbm_mesa_wrapper` (override) | wrapper: LL-NDK; minigbm core: LL-NDK + VNDK-SP libcutils/libc++ + vendor libdrm |

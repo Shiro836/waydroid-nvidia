@@ -29,7 +29,7 @@ Contracts: `build/p7/NV-EGL-CONTRACT.md` (driver side), `build/p7/ANDROID-EGL-CO
 Third-party sources are read from the git object store of pinned clones in `build/p7/src/` (egl-x11 328a5e1b = v1.0.6-5,
 eglexternalplatform cf9f1058, libglvnd faa23f21, frameworks/native 2fe7eddf); nothing third-party is checked in.
 The gralloc handle layout and its validity check are shared with the Vulkan HAL
-(`../hal/include/minigbm/cros_gralloc_handle.h`, `cros_gralloc_handle_mismatch()`).
+(`<driver checkout>/hal/include/minigbm/cros_gralloc_handle.h`, `cros_gralloc_handle_mismatch()`).
 
 Guest layout: `/vendor_extra/lib{,64}/libnvnative-egl-android.so`, `nvnative_egl_android.json`, `nvglibc-default-env`
 (staging tree, rbind-mounted at `/vendor_extra`), and `/vendor/lib{,64}/egl/lib{EGL,GLESv1_CM,GLESv2}_nvnative.so`
@@ -41,7 +41,7 @@ and `ro.hardware.egl` selects one, `../../waydroid/nvidia_native.py`).
 driver on the host). SurfaceFlinger renders screenshots into `SW_READ_OFTEN|SW_WRITE_OFTEN|HW_RENDER|HW_COMPOSER|
 HW_TEXTURE` buffers (usage 0xb33, SurfaceFlinger.cpp:6611-6616), which the gralloc backend used to allocate LINEAR,
 so SurfaceFlinger aborted ("Unable to generate SkSurface") at its first screenshot. Fixed in gralloc
-(`../gralloc/README.md` "Layout rule"): CPU-mapped GPU render targets are block-linear and CPU locks go through a GPU
+(`<driver checkout>/gralloc/README.md` "Layout rule"): CPU-mapped GPU render targets are block-linear and CPU locks go through a GPU
 staging copy. `test/sfimage.c` (`make guest`) reproduces RenderEngine's sequence through Android's libEGL;
 `--usage b33 --cpu-check` adds the gralloc lock contract (native fence as acquire fence, every pixel through the CPU
 view, a CPU write seen by `glReadPixels` and a second lock) and the lock access flags (a GL write during a READ lock
@@ -119,14 +119,14 @@ RenderEngine does on a fresh thread.
 
 **Fix: enforce invariant I from outside the driver** (§6a has the proof): the first
 fence creation on every timeline happens before any wait. The front starts each thread's timeline in `eglMakeCurrent`
-(above); the Vulkan HAL starts each queue's timeline in `vkCreateDevice` (`../hal/AHB-CONTRACT.md` §8). The blob is
-untouched; `make driver-check` (here and in `../hal`) still detects the defect through stock libglvnd / the raw ICD and
+(above); the Vulkan HAL starts each queue's timeline in `vkCreateDevice` (`<driver checkout>/hal/AHB-CONTRACT.md` §8). The blob is
+untouched; `make driver-check` (here and in `<driver checkout>/hal`) still detects the defect through stock libglvnd / the raw ICD and
 fails on 615.71.09 by design.
 
 ## Tests
 
 - `test/host-window.c` (host, glibc, ASan/UBSan): fake `ANativeWindow` per `system/window.h` acting as a 3-buffer
-  BufferQueue over real dma-bufs from `../gralloc`'s host build (`cros_gralloc_handle` as minigbm lays it out). The
+  BufferQueue over real dma-bufs from `<driver checkout>/gralloc`'s host build (`cros_gralloc_handle` as minigbm lays it out). The
   producer follows the Android loader's steps and loads the front with dlopen + dlsym + eglGetProcAddress. Checks pixels
   (per-frame colour + top marker band), sync_file acquire fences, buffer age, swap interval 0/1, resize 256x128→192x96,
   cancel on destroy, references returned, image_native_buffer (LINEAR external, block-linear 2D); `--y-measure`,

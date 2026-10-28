@@ -24,13 +24,18 @@ jobs:
           sudo apt-get install -yq python3-dbus python3-gi python3-pytest
       - name: Assemble patched Waydroid (pinned upstream + baseline + native-mounts patches)
         run: dev/build-waydroid
+      - name: Driver checkout (vendor-image/pins.env NVIDIA_PROLAPSE_REF; the tests read its media/ files)
+        run: python3 tools/driver_source.py fetch
       - name: Unit tests
-        run: /usr/bin/python3 -m pytest -q -p no:cacheprovider waydroid/test_nvidia_native.py dev/test_driver_mode.py dev/test_source_native.py packaging/test_setup.py packaging/native/test_glibc_shim.py
+        run: /usr/bin/python3 -m pytest -q -p no:cacheprovider waydroid/test_nvidia_native.py dev/test_driver_mode.py dev/test_source_native.py packaging/test_setup.py packaging/native/test_glibc_shim.py packaging/native/test_vendor_image.py tools/test_driver_source.py
 
   rust-rm-host:
     name: Rust RM backend (host build, no GPU)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Build libnv_bionic_native (host, release)
-        run: cargo build --locked --release --no-default-features --lib --manifest-path nvidia-prolapse/driver-source/native/Cargo.toml
+      - name: Driver checkout (vendor-image/pins.env NVIDIA_PROLAPSE_REF)
+        run: python3 tools/driver_source.py fetch
+      - name: Build libnv_bionic_native (host, release; the driver's rust-toolchain.toml selects the toolchain)
+        working-directory: build/nvidia-prolapse-src
+        run: cargo build --locked --release --no-default-features --lib -p nv-bionic-native

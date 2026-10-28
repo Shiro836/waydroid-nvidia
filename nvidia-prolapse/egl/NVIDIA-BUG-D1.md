@@ -47,7 +47,7 @@ gives:
      `eglCreateSyncKHR(EGL_SYNC_NATIVE_FENCE_ANDROID)` + `glFlush` + `eglDupNativeFenceFDANDROID` = Fr.
    - It waits for Fr with `poll()`, then calls `glFinish()`. A round is early when `glFinish` still waited more than
      2 ms after Fr had signalled (measured: correct ≤ 1.2 ms, early 4.6–6.3 ms, i.e. the whole draw).
-2. **Vulkan**: `../hal/test/vk-first-wait.c` (loads the ICD directly with `--icd /usr/lib/libEGL_nvidia.so.0`; no
+2. **Vulkan**: `<driver checkout>/hal/test/vk-first-wait.c` (loads the ICD directly with `--icd /usr/lib/libEGL_nvidia.so.0`; no
    loader needed).
 
        cc -O1 -I<android vk_android_native_buffer.h dir> -o vk-first-wait vk-first-wait.c -ldl -lpthread

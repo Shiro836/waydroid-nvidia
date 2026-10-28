@@ -13,6 +13,8 @@ import zipfile
 import pytest
 
 REPO = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPO / 'tools'))
+import driver_source  # noqa: E402  (the driver's media/ files)
 
 
 def load(path, name):
@@ -94,7 +96,7 @@ def test_channel_entry_rejects_other_shapes(tmp_path):
 
 def test_no_nvdec_files_come_from_the_image(tmp_path):
     """GPU without hardware decode: the image's own service .rc gains `oneshot`, the VINTF fragment declares nothing."""
-    rc_src = REPO / 'nvidia-prolapse/media' / vi.native.MEDIA_RC
+    rc_src = driver_source.checkout() / 'media' / vi.native.MEDIA_RC
     src = tmp_path / 'src'
     (src / 'odm/etc/init').mkdir(parents=True)
     (src / 'odm/etc/init' / rc_src.name).write_bytes(rc_src.read_bytes())
